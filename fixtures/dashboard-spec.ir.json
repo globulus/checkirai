@@ -1,0 +1,140 @@
+{
+  "run_goal": "",
+  "requirements": [
+    {
+      "id": "1",
+      "source_text": "Dashboard shows the title “checkirai dashboard”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "checkirai dashboard" }],
+        "detailed": [
+          {
+            "kind": "text_present",
+            "selector": ".dashboard-title",
+            "text": "checkirai dashboard"
+          }
+        ]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "checkirai dashboard" }]
+    },
+    {
+      "id": "2",
+      "source_text": "Dashboard shows a “Run verify_spec” section",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Run verify_spec" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".run-verify-spec" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Run verify_spec" }]
+    },
+    {
+      "id": "3",
+      "source_text": "Dashboard shows “Recent runs”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Recent runs" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".recent-runs" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Recent runs" }]
+    },
+    {
+      "id": "4",
+      "source_text": "Dashboard shows “Live events”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Live events" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".live-events" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Live events" }]
+    },
+    {
+      "id": "5",
+      "source_text": "Dashboard shows “Run graph”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Run graph" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".run-graph" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Run graph" }]
+    },
+    {
+      "id": "6",
+      "source_text": "Dashboard shows “Response”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Response" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".response" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Response" }]
+    },
+    {
+      "id": "7",
+      "source_text": "Dashboard shows “Quick actions”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Quick actions" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".quick-actions" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Quick actions" }]
+    },
+    {
+      "id": "8",
+      "source_text": "Dashboard shows “Ollama models”",
+      "type": "visible_state",
+      "priority": "must",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Ollama models" }],
+        "detailed": [{ "kind": "element_visible", "selector": ".ollama-models" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Ollama models" }]
+    },
+    {
+      "id": "9",
+      "source_text": "Buttons should be green (intentional fail)",
+      "type": "appearance",
+      "priority": "could",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "element_visible", "selector": "button" }],
+        "detailed": [
+          {
+            "kind": "element_visible",
+            "selector": "button",
+            "metadata": { "css": { "color": "green" } }
+          }
+        ]
+      },
+      "expected_observables": [
+        {
+          "kind": "element_visible",
+          "selector": "button",
+          "metadata": { "css": { "color": "green" } }
+        }
+      ],
+      "notes": "Appearance constraint inferred from markdown; deterministic judge may not verify styles yet."
+    },
+    {
+      "id": "10",
+      "source_text": "Dashboard should show the current time of day (intentional fail)",
+      "type": "visible_state",
+      "priority": "could",
+      "expected_observables_sets": {
+        "generic": [{ "kind": "text_present", "text": "Current time" }],
+        "detailed": [{ "kind": "text_present", "selector": ".current-time" }]
+      },
+      "expected_observables": [{ "kind": "text_present", "text": "Current time" }]
+    }
+  ],
+  "acceptance_policy": {
+    "strictness": "balanced",
+    "allow_model_assist": false,
+    "observable_detail": "both"
+  }
+}
+

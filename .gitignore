@@ -1,0 +1,11 @@
+node_modules/
+.verifier/
+.pnpm-store/
+.env
+.cache/
+dist/
+web/node_modules/
+web/dist/
+web/.cache/
+web/.verifier/
+.verifier-test/

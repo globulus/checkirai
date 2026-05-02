@@ -1,0 +1,11 @@
+- Dashboard shows the title “checkirai dashboard”
+- Dashboard shows a “Run verify_spec” section
+- Dashboard shows “Recent runs”
+- Dashboard shows “Live events”
+- Dashboard shows “Run graph”
+- Dashboard shows “Response”
+- Dashboard shows “Quick actions”
+- Dashboard shows “Ollama models”
+- Buttons should be green (intentional fail)
+- Dashboard should show the current time of day (intentional fail)
+

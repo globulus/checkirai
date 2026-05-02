@@ -1,0 +1,468 @@
+import { randomUUID } from "node:crypto";
+import type { ArtifactStore } from "../artifacts/store.js";
+import type { ArtifactRef } from "../artifacts/types.js";
+import type { CapabilitySet } from "../capabilities/types.js";
+import type { RunEventSink } from "../ops/events.js";
+import type { Probe, ProbePlan, ProbeStep } from "../planners/types.js";
+import { assertPolicyAllows, getPolicy } from "../policies/policy.js";
+import { VerifierError } from "../shared/errors.js";
+import type { ExecutorIntegrations } from "./integrations.js";
+import type { ToolCallRecord } from "./types.js";
+
+export type ExecutionOutput = {
+  toolCalls: ToolCallRecord[];
+  artifacts: ArtifactRef[];
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function extractMcpText(res: unknown): string {
+  const r = res as {
+    structuredContent?: unknown;
+    content?: Array<{ type?: unknown; text?: unknown }>;
+  };
+  if (typeof r.structuredContent === "string") return r.structuredContent;
+  const text = r.content
+    ?.map((c) => (typeof c?.text === "string" ? c.text : ""))
+    .filter(Boolean)
+    .join("\n");
+  if (typeof text === "string" && text.trim()) return text;
+  return JSON.stringify(res, null, 2);
+}
+
+function tryParseJsonFence(text: string): unknown | undefined {
+  // Common chrome-devtools-mcp shape:
+  // Script ran on page and returned:
+  // ```json
+  // [...]
+  // ```
+  const m = text.match(/```json\s*([\s\S]*?)\s*```/i);
+  const payload = m?.[1]?.trim();
+  if (!payload) return undefined;
+  try {
+    return JSON.parse(payload) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+async function runStep(
+  runId: string,
+  probeId: string | undefined,
+  capabilities: CapabilitySet,
+  integrations: ExecutorIntegrations,
+  store: ArtifactStore,
+  step: ProbeStep,
+  policyName: "read_only" | "ui_only",
+  onEvent?: RunEventSink,
+): Promise<{
+  toolCall: ToolCallRecord;
+  artifacts: ArtifactRef[];
+  output?: unknown;
+}> {
+  const id = randomUUID();
+  const startedAt = nowIso();
+
+  if (onEvent) {
+    const ev: {
+      type: "step_started";
+      runId: string;
+      toolCallId: string;
+      capability: string;
+      action: string;
+      startedAt: string;
+      probeId?: string;
+      args?: unknown;
+    } = {
+      type: "step_started",
+      runId,
+      toolCallId: id,
+      capability: step.capability,
+      action: step.action,
+      startedAt,
+      ...(step.args ? { args: step.args } : {}),
+    };
+    if (probeId) ev.probeId = probeId;
+    onEvent(ev);
+  }
+
+  const mk = (ok: boolean, patch?: Partial<ToolCallRecord>) => {
+    const base: ToolCallRecord = {
+      id,
+      runId,
+      capability: step.capability,
+      action: step.action,
+      startedAt,
+      endedAt: nowIso(),
+      ok,
+      ...patch,
+    };
+    if (probeId) base.probeId = probeId;
+    return base;
+  };
+
+  try {
+    if (!capabilities.has(step.capability)) {
+      throw new VerifierError(
+        "TOOL_UNAVAILABLE",
+        `Capability not available: ${step.capability}`,
+      );
+    }
+    assertPolicyAllows(getPolicy(policyName), step.capability);
+
+    let output: unknown;
+    switch (step.capability) {
+      case "read_files": {
+        if (!integrations.fs)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "FS integration not configured.",
+          );
+        const path = String(step.args?.path ?? "");
+        output = { path, text: integrations.fs.readText(path) };
+        break;
+      }
+      case "call_http": {
+        if (!integrations.http)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "HTTP integration not configured.",
+          );
+        const url = String(step.args?.url ?? "");
+        output = await integrations.http.get(url);
+        break;
+      }
+      case "navigate": {
+        if (!integrations.chrome)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Chrome DevTools integration not configured.",
+          );
+        const url = String(step.args?.url ?? "");
+        await integrations.chrome.navigate(url);
+        output = { ok: true, url };
+        break;
+      }
+      case "read_ui_structure": {
+        if (!integrations.chrome)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Chrome DevTools integration not configured.",
+          );
+        // If caller specifies an explicit tool name, use it; else default to take_snapshot.
+        if (step.action && step.action !== "take_snapshot") {
+          const res = await integrations.chrome.call(
+            step.action,
+            (step.args?.toolArgs as Record<string, unknown> | undefined) ?? {},
+          );
+          output = { response: res };
+        } else {
+          const { snapshot, artifact } =
+            await integrations.chrome.takeSnapshot(store);
+          output = {
+            snapshotText: snapshot.snapshotText,
+            artifactId: artifact.id,
+          };
+        }
+        break;
+      }
+      case "read_visual": {
+        if (!integrations.chrome)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Chrome DevTools integration not configured.",
+          );
+        const label =
+          typeof step.args?.label === "string"
+            ? (step.args.label as string)
+            : undefined;
+        if (step.action && step.action !== "take_screenshot") {
+          const res = await integrations.chrome.call(
+            step.action,
+            (step.args?.toolArgs as Record<string, unknown> | undefined) ?? {},
+          );
+          output = { response: res, label };
+        } else {
+          const artifact = await integrations.chrome.takeScreenshot(
+            store,
+            label,
+          );
+          output = { artifactId: artifact.id };
+        }
+        break;
+      }
+      case "interact": {
+        if (!integrations.chrome)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Chrome DevTools integration not configured.",
+          );
+        // If the planner specifies an explicit chrome-devtools tool, just call it.
+        if (step.action && !["run_steps"].includes(step.action)) {
+          const res = await integrations.chrome.call(
+            step.action,
+            (step.args ?? {}) as Record<string, unknown>,
+          );
+          // Try to structure common evidence payloads to help model-assisted judging.
+          if (step.action === "evaluate_script") {
+            const responseText = extractMcpText(res);
+            const parsed = tryParseJsonFence(responseText);
+            output = {
+              response: res,
+              responseText,
+              ...(parsed !== undefined ? { parsedJson: parsed } : {}),
+            };
+          } else {
+            output = { response: res };
+          }
+          break;
+        }
+        // MVP: support { kind: 'click_text', text } and { kind: 'type', text } and { kind: 'fill_text', needle, value }
+        const kind = String(step.args?.kind ?? "");
+        if (kind === "type") {
+          const text = String(step.args?.text ?? "");
+          await integrations.chrome.typeText(text);
+          output = { ok: true };
+          break;
+        }
+        // click/fill need a snapshot to find uid by needle
+        const { snapshot } = await integrations.chrome.takeSnapshot(store);
+        if (kind === "click_text") {
+          const needle = String(step.args?.text ?? "");
+          const uid = integrations.chrome.findUid(
+            snapshot.snapshotText,
+            needle,
+          );
+          if (!uid)
+            throw new VerifierError(
+              "TOOL_UNAVAILABLE",
+              `Could not find element uid for text: ${needle}`,
+            );
+          await integrations.chrome.clickUid(uid);
+          output = { ok: true, uid };
+          break;
+        }
+        if (kind === "fill_text") {
+          const needle = String(step.args?.needle ?? "");
+          const value = String(step.args?.value ?? "");
+          const uid = integrations.chrome.findUid(
+            snapshot.snapshotText,
+            needle,
+          );
+          if (!uid)
+            throw new VerifierError(
+              "TOOL_UNAVAILABLE",
+              `Could not find element uid for: ${needle}`,
+            );
+          await integrations.chrome.fill(uid, value);
+          output = { ok: true, uid };
+          break;
+        }
+        throw new VerifierError(
+          "TOOL_UNAVAILABLE",
+          `Unsupported interact kind: ${kind}`,
+        );
+      }
+      case "read_console": {
+        if (!integrations.chrome)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Chrome DevTools integration not configured.",
+          );
+        const res = await integrations.chrome.call(
+          "list_console_messages",
+          (step.args ?? {}) as Record<string, unknown>,
+        );
+        output = { response: res };
+        break;
+      }
+      case "read_network": {
+        if (!integrations.chrome)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Chrome DevTools integration not configured.",
+          );
+        const res = await integrations.chrome.call(
+          "list_network_requests",
+          (step.args ?? {}) as Record<string, unknown>,
+        );
+        output = { response: res };
+        break;
+      }
+      case "run_command": {
+        if (!integrations.shell)
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            "Shell integration not configured.",
+          );
+        const command = String(step.args?.command ?? "");
+        const args = Array.isArray(step.args?.args)
+          ? (step.args?.args as string[])
+          : [];
+        const runOpts: { cwd?: string; timeoutMs?: number } = {};
+        if (typeof step.args?.cwd === "string")
+          runOpts.cwd = step.args.cwd as string;
+        if (typeof step.args?.timeoutMs === "number")
+          runOpts.timeoutMs = step.args.timeoutMs as number;
+        output = await integrations.shell.run(command, args, runOpts);
+        break;
+      }
+      default:
+        throw new VerifierError(
+          "TOOL_UNAVAILABLE",
+          `Executor does not yet support capability: ${step.capability}`,
+        );
+    }
+
+    const artifact = store.writeJson("tool_output", output, {
+      metadata: { capability: step.capability, action: step.action },
+    });
+
+    return {
+      toolCall: mk(true, { outputArtifactId: artifact.id }),
+      artifacts: [artifact],
+      output,
+    };
+  } catch (err) {
+    const e =
+      err instanceof VerifierError
+        ? err
+        : new VerifierError("TOOL_UNAVAILABLE", "Step failed.", { cause: err });
+    const artifact = store.writeJson(
+      "tool_output",
+      { error: { code: e.code, message: e.message, details: e.details } },
+      { metadata: { failed: true } },
+    );
+    return {
+      toolCall: mk(false, {
+        errorCode: e.code,
+        errorMessage: e.message,
+        outputArtifactId: artifact.id,
+      }),
+      artifacts: [artifact],
+    };
+  }
+}
+
+async function runProbe(
+  runId: string,
+  capabilities: CapabilitySet,
+  integrations: ExecutorIntegrations,
+  store: ArtifactStore,
+  probe: Probe,
+  policyName: "read_only" | "ui_only",
+  onEvent?: RunEventSink,
+): Promise<ExecutionOutput> {
+  const toolCalls: ToolCallRecord[] = [];
+  const artifacts: ArtifactRef[] = [];
+
+  onEvent?.({
+    type: "probe_started",
+    runId,
+    probeId: probe.id,
+    requirementId: probe.requirementId,
+  });
+
+  for (const step of probe.steps) {
+    const res = await runStep(
+      runId,
+      probe.id,
+      capabilities,
+      integrations,
+      store,
+      step,
+      policyName,
+      onEvent,
+    );
+    toolCalls.push(res.toolCall);
+    artifacts.push(...res.artifacts);
+
+    const finished = {
+      type: "step_finished" as const,
+      runId,
+      probeId: probe.id,
+      toolCallId: res.toolCall.id,
+      capability: res.toolCall.capability,
+      action: res.toolCall.action,
+      startedAt: res.toolCall.startedAt,
+      endedAt: res.toolCall.endedAt,
+      ok: res.toolCall.ok,
+      ...(res.toolCall.errorCode ? { errorCode: res.toolCall.errorCode } : {}),
+      ...(res.toolCall.errorMessage
+        ? { errorMessage: res.toolCall.errorMessage }
+        : {}),
+      ...(res.toolCall.outputArtifactId
+        ? { outputArtifactId: res.toolCall.outputArtifactId }
+        : {}),
+    };
+    onEvent?.(finished);
+  }
+
+  return { toolCalls, artifacts };
+}
+
+export async function executePlan(opts: {
+  runId: string;
+  plan: ProbePlan;
+  capabilities: CapabilitySet;
+  integrations: ExecutorIntegrations;
+  artifactStore: ArtifactStore;
+  policyName: "read_only" | "ui_only";
+  /**
+   * Optional bootstrap navigation URL.
+   * If provided and the `navigate` capability is available, the executor will
+   * navigate once per session before running any probes.
+   */
+  targetUrl?: string;
+  onEvent?: RunEventSink;
+}): Promise<ExecutionOutput> {
+  const toolCalls: ToolCallRecord[] = [];
+  const artifacts: ArtifactRef[] = [];
+
+  for (const session of opts.plan.sessions) {
+    // Session bootstrap: ensure we're on the intended page before any snapshots.
+    // Many specs are pure assertions (no explicit navigation step), so without
+    // this we end up snapshotting whatever page Chrome currently has open.
+    if (
+      typeof opts.targetUrl === "string" &&
+      opts.targetUrl.trim() &&
+      opts.capabilities.has("navigate") &&
+      opts.integrations.chrome
+    ) {
+      const res = await runStep(
+        opts.runId,
+        undefined,
+        opts.capabilities,
+        opts.integrations,
+        opts.artifactStore,
+        {
+          capability: "navigate",
+          action: "navigate_page",
+          args: { url: opts.targetUrl },
+        },
+        opts.policyName,
+        opts.onEvent,
+      );
+      toolCalls.push(res.toolCall);
+      artifacts.push(...res.artifacts);
+    }
+
+    for (const probe of session.probes) {
+      const res = await runProbe(
+        opts.runId,
+        opts.capabilities,
+        opts.integrations,
+        opts.artifactStore,
+        probe,
+        opts.policyName,
+        opts.onEvent,
+      );
+      toolCalls.push(...res.toolCalls);
+      artifacts.push(...res.artifacts);
+    }
+  }
+
+  return { toolCalls, artifacts };
+}

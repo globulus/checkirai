@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "defaults": {
+    "targetUrl": "http://localhost:5173",
+    "tools": "fs,http,playwright-mcp,chrome-devtools",
+    "outRoot": ".verifier"
+  },
+  "llm": {
+    "provider": "ollama",
+    "ollamaHost": "http://127.0.0.1:11434",
+    "ollamaModel": "auto",
+    "allowAutoPull": true,
+    "requireToolCapable": true
+  },
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "pnpm",
+      "args": ["exec", "chrome-devtools-mcp", "--isolated"]
+    }
+  },
+  "skills": []
+}

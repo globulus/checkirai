@@ -1,0 +1,60 @@
+{
+  "name": "checkirai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Spec-driven verification runtime for AI coding agents (CLI + MCP server).",
+  "license": "MIT",
+  "bin": {
+    "checkirai": "./bin/checkirai.js",
+    "spec-driven-verifier": "./bin/checkirai.js",
+    "verify-app": "./bin/checkirai.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "node --import tsx src/interfaces/cli/index.ts --help",
+    "cli": "node --import tsx src/interfaces/cli/bin.ts --help",
+    "mcp": "node --import tsx src/interfaces/mcp/bin.ts",
+    "web:api": "node --import tsx src/interfaces/web/bin.ts",
+    "web:ui": "vite --config web/vite.config.ts --port 5173",
+    "web:dev": "concurrently -k -n api,ui -c blue,green \"pnpm -s run web:api\" \"pnpm -s run web:ui\"",
+    "web:build": "pnpm -s run build && vite build --config web/vite.config.ts",
+    "web:start": "SERVE_STATIC_FROM=web/dist node dist/src/interfaces/web/bin.js",
+    "prepare": "pnpm -s run build",
+    "prepack": "pnpm -s run build",
+    "postinstall": "pnpm -s run build",
+    "lint": "biome check .",
+    "lint:fix": "biome check . --write",
+    "format": "biome format .",
+    "format:fix": "biome format . --write",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.9.0",
+    "commander": "^12.1.0",
+    "pino": "^9.6.0",
+    "playwright": "^1.59.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.8",
+    "@vitejs/plugin-react": "^5.0.2",
+    "chrome-devtools-mcp": "^0.23.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "vitest": "^3.2.4"
+  }
+}
