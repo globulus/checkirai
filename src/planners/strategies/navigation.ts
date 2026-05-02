@@ -5,7 +5,9 @@ import { getExpectedObservables } from "../../spec/observables.js";
 import type { Probe } from "../types.js";
 
 export function planNavigationProbe(req: RequirementIR, spec?: SpecIR): Probe {
-  const exps = spec ? getExpectedObservables(spec, req) : req.expected_observables;
+  const exps = spec
+    ? getExpectedObservables(spec, req)
+    : req.expected_observables;
   return {
     id: randomUUID(),
     requirementId: req.id,

@@ -184,6 +184,7 @@ This runs `node --import tsx src/interfaces/mcp/bin.ts`. Optional environment:
 | Tool                 | Purpose |
 | -------------------- | ------- |
 | `verify_spec`        | Full run: normalize/plan/execute/judge; returns structured verification result |
+| `restart_verify_spec` | New run chained to a parent: `restartFromPhase` `spec_ir` or `llm_plan`, inherits `targetUrl` / default `llm` from parent when omitted (same engine as `verify_spec` + `restartFromRunId`) |
 | `suggest_probe_plan` | Plan probes from `specMarkdown` or `spec` + tool set without executing |
 | `list_capabilities` | List capability classes for a comma-separated `tools` string (`fs`, `http`, `shell`, `playwright-mcp`, `chrome-devtools`, …) |
 
@@ -212,30 +213,70 @@ This runs `node --import tsx src/interfaces/mcp/bin.ts`. Optional environment:
 
 Register a **stdio** server whose working directory is this repo.
 
-### Recommended: `pnpm mcp`
+**Important:** MCP expects **only JSON-RPC on stdout**. Plain `pnpm mcp` is unsuitable in Cursor because pnpm prints the script banner to stdout before the server starts, which breaks the protocol (you may see `MCP error -32000: Connection closed`). Use one of the options below.
 
-```json
-{
-  "mcpServers": {
-    "checkirai": {
-      "command": "pnpm",
-      "args": ["mcp"],
-      "cwd": "/absolute/path/to/checkirai-repo"
-    }
-  }
-}
-```
+**`cwd`:** Set `cwd` to the **checkirai clone root** (absolute path). If Cursor opens another folder as the workspace, a missing or wrong `cwd` produces `ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'` when using `--import tsx`, because `tsx` only exists under that repo’s `node_modules`.
 
-Adjust `cwd` to your clone. Ensure `pnpm` is on the PATH Cursor uses.
+**Relative `args` and Cursor:** Some hosts spawn the MCP process with a default working directory (for example your home folder) even when `cwd` is set in `mcp.json`. Then `node` looks for `dist/.../bin.js` under the wrong place (errors like `Cannot find module '/Users/you/dist/src/interfaces/mcp/bin.js'`). Use an **absolute path** to `bin.js` in `args` so the entry file is always found; keep `cwd` on the clone root for anything in the runtime that still uses `process.cwd()`.
 
-### Alternative: direct `tsx` entry (no pnpm in PATH)
+### Recommended for Cursor: `node` on compiled output (no `tsx`)
+
+After `pnpm install` in the clone, `postinstall` runs `pnpm build`, which emits `dist/src/interfaces/mcp/bin.js`. This avoids the `tsx` loader entirely.
 
 ```json
 {
   "mcpServers": {
     "checkirai": {
       "command": "node",
-      "args": ["--import", "tsx", "/absolute/path/to/checkirai-repo/src/interfaces/mcp/bin.ts"],
+      "args": ["/absolute/path/to/checkirai-repo/dist/src/interfaces/mcp/bin.js"],
+      "cwd": "/absolute/path/to/checkirai-repo"
+    }
+  }
+}
+```
+
+Use Node **22+** (see `engines` in `package.json`). If `dist/` is missing, run `pnpm build` in that repo (or reinstall without `--ignore-scripts`).
+
+### Alternative: `node` + `tsx` (dev workflow; needs correct `cwd`)
+
+```json
+{
+  "mcpServers": {
+    "checkirai": {
+      "command": "node",
+      "args": ["--import", "tsx", "src/interfaces/mcp/bin.ts"],
+      "cwd": "/absolute/path/to/checkirai-repo"
+    }
+  }
+}
+```
+
+`cwd` must be the clone root so `node` can resolve the `tsx` package from `node_modules`.
+
+### Alternative: `pnpm` with silent run (same script as `pnpm mcp`)
+
+```json
+{
+  "mcpServers": {
+    "checkirai": {
+      "command": "pnpm",
+      "args": ["--silent", "mcp"],
+      "cwd": "/absolute/path/to/checkirai-repo"
+    }
+  }
+}
+```
+
+`pnpm --silent` avoids printing the lifecycle script lines to stdout. Ensure `pnpm` is on the PATH Cursor uses.
+
+### Alternative: `pnpm exec` (no script banner)
+
+```json
+{
+  "mcpServers": {
+    "checkirai": {
+      "command": "pnpm",
+      "args": ["exec", "node", "--import", "tsx", "src/interfaces/mcp/bin.ts"],
       "cwd": "/absolute/path/to/checkirai-repo"
     }
   }
@@ -249,7 +290,8 @@ After saving, reload MCP; tools such as `verify_spec` should appear for the agen
 1. Implement changes.  
 2. Call **`verify_spec`**.  
 3. Use **`get_report`**, **`get_run_graph`**, **`explain_failure`**, or **`get_artifact`** as needed.  
-4. Patch and rerun **`verify_spec`**.  
+4. To skip re-normalizing the spec or to replan after a tooling change, call **`restart_verify_spec`** with the prior **`runId`** as **`parentRunId`** and the right phase (`spec_ir` or `llm_plan`), or pass **`restartFromPhase`** / **`restartFromRunId`** on **`verify_spec`**.  
+5. Patch and rerun **`verify_spec`** or **`restart_verify_spec`** as needed.  
 
 ---
 
@@ -272,6 +314,8 @@ Common optional fields:
 | `chromeDevtoolsServer`   | `{ "command": "...", "args": ["..."], "cwd": "..." }` to spawn Chrome DevTools MCP for this run (CLI can also read `checkirai.config.json`) |
 | `restartFromPhase`       | `spec_ir` or `llm_plan` (not `start`) |
 | `restartFromRunId`       | Parent run UUID when restarting |
+
+For a focused restart call, **`restart_verify_spec`** accepts **`parentRunId`** (same UUID), **`restartFromPhase`** (`spec_ir` \| `llm_plan`), and optional overrides; see the tool description in the MCP host.
 
 ### Example: markdown
 
@@ -325,4 +369,4 @@ Inputs are resolved to one combined markdown string, then normalized to Spec IR 
 ## See also
 
 - **[README.md](../README.md)** — overview, full CLI flag tables, dashboard summary.  
-- Run `pnpm mcp` and attach Cursor when you want the fastest edit–verify loop with local tools and models.
+- For the fastest edit–verify loop in Cursor, register the MCP server as in **Cursor** above (`node dist/.../bin.js` or `pnpm --silent mcp`); use `pnpm mcp` only in a terminal where stdout is not the MCP transport.

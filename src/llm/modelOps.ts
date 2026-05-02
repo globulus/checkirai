@@ -139,8 +139,12 @@ export async function ensureModelAvailable(
       .filter((m) => localNames.has(m.name))
       .slice()
       .sort((a: RecommendedModel, b: RecommendedModel) => {
-        const ar = a.capability.speedTier ? tierRank[a.capability.speedTier] : 0;
-        const br = b.capability.speedTier ? tierRank[b.capability.speedTier] : 0;
+        const ar = a.capability.speedTier
+          ? tierRank[a.capability.speedTier]
+          : 0;
+        const br = b.capability.speedTier
+          ? tierRank[b.capability.speedTier]
+          : 0;
         // Higher rank first; break ties by higher context hint (if any).
         const ctxA = a.capability.minContextTokensHint ?? 0;
         const ctxB = b.capability.minContextTokensHint ?? 0;

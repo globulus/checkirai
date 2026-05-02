@@ -101,13 +101,18 @@ export function validateArgsAgainstInputSchema(
   if (!schemaObject(inputSchema)) return { ok: true };
   if (inputSchema.type !== "object") return { ok: true };
 
-  const props = schemaObject(inputSchema.properties) ? inputSchema.properties : {};
+  const props = schemaObject(inputSchema.properties)
+    ? inputSchema.properties
+    : {};
   const required = Array.isArray(inputSchema.required)
-    ? (inputSchema.required as unknown[]).filter((x): x is string => typeof x === "string")
+    ? (inputSchema.required as unknown[]).filter(
+        (x): x is string => typeof x === "string",
+      )
     : [];
 
   for (const k of required) {
-    if (!(k in args)) return { ok: false, message: `Missing required arg: ${k}` };
+    if (!(k in args))
+      return { ok: false, message: `Missing required arg: ${k}` };
   }
 
   if (inputSchema.additionalProperties === false) {
@@ -136,9 +141,18 @@ export function validateArgsAgainstInputSchema(
         const it = items.type;
         for (const item of val) {
           if (it === "string" && typeof item !== "string")
-            return { ok: false, message: `Invalid array item for ${k}: expected string` };
-          if (it === "integer" && !(typeof item === "number" && Number.isInteger(item)))
-            return { ok: false, message: `Invalid array item for ${k}: expected integer` };
+            return {
+              ok: false,
+              message: `Invalid array item for ${k}: expected string`,
+            };
+          if (
+            it === "integer" &&
+            !(typeof item === "number" && Number.isInteger(item))
+          )
+            return {
+              ok: false,
+              message: `Invalid array item for ${k}: expected integer`,
+            };
         }
       }
     }
@@ -184,7 +198,8 @@ export function validatePlan(
   return { ok: issues.length === 0, issues, score };
 }
 
-export function requiredPolicyForCapabilities(caps: Set<CapabilityName>): "read_only" | "ui_only" {
+export function requiredPolicyForCapabilities(
+  caps: Set<CapabilityName>,
+): "read_only" | "ui_only" {
   return caps.has("interact") ? "ui_only" : "read_only";
 }
-

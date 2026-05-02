@@ -64,7 +64,9 @@ function extractOllamaErrorMessage(bodyText: string): string | null {
   return firstLine && firstLine.trim() ? firstLine.trim() : null;
 }
 
-function summarizeGenerateRequest(req: OllamaGenerateRequest): Record<string, unknown> {
+function summarizeGenerateRequest(
+  req: OllamaGenerateRequest,
+): Record<string, unknown> {
   return {
     model: req.model,
     promptChars: req.prompt.length,
@@ -77,7 +79,10 @@ function summarizeGenerateRequest(req: OllamaGenerateRequest): Record<string, un
 
 const logger = pino({ name: "checkirai-ollama" });
 
-function truncate(s: string, max: number): { text: string; truncated: boolean } {
+function truncate(
+  s: string,
+  max: number,
+): { text: string; truncated: boolean } {
   if (max <= 0) return { text: "", truncated: s.length > 0 };
   if (s.length <= max) return { text: s, truncated: false };
   return { text: `${s.slice(0, max)}\n…(truncated)`, truncated: true };
@@ -215,7 +220,8 @@ export async function ollamaGenerate(
 ): Promise<OllamaGenerateResponse> {
   const url = joinUrl(host, "api/generate");
   const trace =
-    process.env.CHECKIRAI_LOG_LLM === "1" || process.env.CHECKIRAI_LOG_LLM === "true";
+    process.env.CHECKIRAI_LOG_LLM === "1" ||
+    process.env.CHECKIRAI_LOG_LLM === "true";
   const t0 = performance.now();
   let res: Response;
   try {
@@ -277,7 +283,10 @@ export async function ollamaGenerate(
         request: summarizeGenerateRequest(req),
         promptPreview: promptPreview.text,
         responsePreview: responsePreview.text,
-        truncated: { prompt: promptPreview.truncated, response: responsePreview.truncated },
+        truncated: {
+          prompt: promptPreview.truncated,
+          response: responsePreview.truncated,
+        },
         done: out.done,
         done_reason: out.done_reason,
         total_duration: out.total_duration,

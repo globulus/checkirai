@@ -481,7 +481,9 @@ export async function judgeWithSelfConsistency(opts: {
           expected,
           ...(rubricByReq.get(r.id) ? { rubric: rubricByReq.get(r.id)! } : {}),
           evidence,
-          ...(opts.onSelectedModel ? { onSelectedModel: opts.onSelectedModel } : {}),
+          ...(opts.onSelectedModel
+            ? { onSelectedModel: opts.onSelectedModel }
+            : {}),
         }),
       );
     }

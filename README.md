@@ -178,7 +178,7 @@ Verify the Chrome DevTools MCP server exposes the expected tool surface.
 Checkir AI exposes an **MCP server** (stdio) so editors and agents can call verification as tools instead of shelling out.
 
 - **Implementation:** `src/interfaces/mcp/server.ts` (`startMcpServer()`)
-- **Tools:** verification (`verify_spec`, `suggest_probe_plan`, `list_capabilities`), run inspection (`get_report`, `get_run_graph`, `get_artifact`, `explain_failure`), and Ollama helpers (`ollama_status`, `model_list`, `model_suggest`, `model_pull`, `model_ensure`)
+- **Tools:** verification (`verify_spec`, `restart_verify_spec`, `suggest_probe_plan`, `list_capabilities`), run inspection (`get_report`, `get_run_graph`, `get_artifact`, `explain_failure`), and Ollama helpers (`ollama_status`, `model_list`, `model_suggest`, `model_pull`, `model_ensure`)
 
 Start the server locally (stdio):
 
@@ -188,7 +188,7 @@ pnpm mcp
 
 Optional: set `CHECKIRAI_OUT` to override the verifier output root (default `.verifier`).
 
-**Cursor:** register the MCP server with `pnpm mcp` as the command and this repo as `cwd`—see **[docs/USAGE.md](docs/USAGE.md)** for a ready-made JSON snippet and `verify_spec` examples.
+**Cursor:** register the MCP server with **`node`** and an **absolute** path to **`dist/src/interfaces/mcp/bin.js`**, plus **`cwd`** on the clone root (built by `pnpm install` / `pnpm build`); or `pnpm --silent mcp`. Do **not** use plain `pnpm mcp` in the editor (script banner on stdout breaks MCP stdio). If `args` use a relative `dist/...` path and you see **`Cannot find module '/Users/…/dist/...'`** (home or wrong prefix), Cursor did not apply `cwd` to the child—switch the script path in `args` to an absolute path. If you use `--import tsx` and see **`ERR_MODULE_NOT_FOUND` for `tsx`**, fix `cwd` or install deps in that clone. See **[docs/USAGE.md](docs/USAGE.md)** for JSON snippets and `verify_spec` examples.
 
 For end-to-end examples, probe output layout, and integration notes, **`docs/USAGE.md`** is the detailed guide.
 
@@ -238,7 +238,7 @@ You do **not** have to redo every expensive step. A parent run stores artifacts;
 | **`spec_ir`**    | Reuse the parent’s **frozen Spec IR**—skip normalization LLM work; continue with planning and later stages.                                                                                                                                                                                          |
 | **`llm_plan`**   | Reuse the parent’s **saved test-plan artifact**—skip normalization and the main planning phase; continue with execution and judgement. Requires the same kind of setup as a full **Chrome DevTools + LLM** generic loop (e.g. `chrome-devtools` in `--tools` and an LLM provider other than `none`). |
 
-The same **`restartFromPhase` / `restartFromRunId`** fields exist on **`verify_spec`** over MCP and on the web API. Pick the phase that matches how much of the parent run you want to reuse when iterating on plans, tooling, or judges.
+The same **`restartFromPhase` / `restartFromRunId`** fields exist on **`verify_spec`** over MCP and on the web API; over MCP you can also call **`restart_verify_spec`** with **`parentRunId`** (and optional overrides). Pick the phase that matches how much of the parent run you want to reuse when iterating on plans, tooling, or judges.
 
 ---
 

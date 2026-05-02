@@ -89,10 +89,9 @@ function ensureDualObservableSets(spec: SpecIR): SpecIR {
     requirements: spec.requirements.map((req) => {
       const detailed = req.expected_observables ?? [];
       const existing = req.expected_observables_sets;
-      const generic =
-        existing?.generic?.length
-          ? existing.generic
-          : deriveGenericObservablesFromSource(req.source_text, detailed);
+      const generic = existing?.generic?.length
+        ? existing.generic
+        : deriveGenericObservablesFromSource(req.source_text, detailed);
 
       return {
         ...req,
@@ -138,9 +137,9 @@ export function normalizeMarkdownToSpecIR(markdown: string): SpecIR {
 
   return ensureDualObservableSets(
     SpecIRSchema.parse({
-    run_goal: "Verify implementation against provided markdown spec.",
-    requirements,
-  }),
+      run_goal: "Verify implementation against provided markdown spec.",
+      requirements,
+    }),
   );
 }
 
@@ -237,7 +236,9 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   const maxResponseChars = Math.max(0, opts?.maxResponseChars ?? 20_000);
 
   const heuristic = (provider: SpecNormalizationMeta["provider"]) => {
-    const specIr = ensureDualObservableSets(normalizeMarkdownToSpecIR(markdown));
+    const specIr = ensureDualObservableSets(
+      normalizeMarkdownToSpecIR(markdown),
+    );
     const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
     return {
       specIr,
@@ -346,7 +347,10 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
       host: llm.ollamaHost,
       model: selectedModel,
       system,
-      prompt: prompt.length > maxPromptChars ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)` : prompt,
+      prompt:
+        prompt.length > maxPromptChars
+          ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)`
+          : prompt,
       responseText:
         gen.response.length > maxResponseChars
           ? `${gen.response.slice(0, maxResponseChars)}\n…(truncated)`
@@ -354,7 +358,10 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
       durationMs: durMs,
       promptChars: prompt.length,
       responseChars: gen.response.length,
-      truncated: { prompt: prompt.length > maxPromptChars, response: gen.response.length > maxResponseChars },
+      truncated: {
+        prompt: prompt.length > maxPromptChars,
+        response: gen.response.length > maxResponseChars,
+      },
       phase: "spec_normalization",
     });
   } catch (err) {
@@ -382,7 +389,10 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
         host: llm.ollamaHost,
         model: ensured.selectedModel,
         system,
-        prompt: prompt.length > maxPromptChars ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)` : prompt,
+        prompt:
+          prompt.length > maxPromptChars
+            ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)`
+            : prompt,
         responseText:
           gen.response.length > maxResponseChars
             ? `${gen.response.slice(0, maxResponseChars)}\n…(truncated)`
@@ -390,7 +400,10 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
         durationMs: durMs,
         promptChars: prompt.length,
         responseChars: gen.response.length,
-        truncated: { prompt: prompt.length > maxPromptChars, response: gen.response.length > maxResponseChars },
+        truncated: {
+          prompt: prompt.length > maxPromptChars,
+          response: gen.response.length > maxResponseChars,
+        },
         phase: "spec_normalization",
       });
     } else {
@@ -411,11 +424,14 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   // Post-process to prevent obviously-wrong observable encodings.
   const specIr = ensureDualObservableSets(
     SpecIRSchema.parse({
-    ...parsed,
-    requirements: parsed.requirements.map((r) =>
-      postProcessRequirement({ ...r, ...(r.notes ? { notes: r.notes } : {}) }),
-    ),
-  }),
+      ...parsed,
+      requirements: parsed.requirements.map((r) =>
+        postProcessRequirement({
+          ...r,
+          ...(r.notes ? { notes: r.notes } : {}),
+        }),
+      ),
+    }),
   );
 
   const durationMs = Math.max(0, Math.round(performance.now() - startedAt));

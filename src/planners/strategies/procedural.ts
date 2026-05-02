@@ -60,7 +60,11 @@ function stepsToProbeSteps(steps: StepIR[]): ProbeStep[] {
       out.push({
         capability: "interact",
         action: "run_steps",
-        args: { kind: "fill_text", needle: s.selector ?? s.text ?? "", value: s.text ?? "" },
+        args: {
+          kind: "fill_text",
+          needle: s.selector ?? s.text ?? "",
+          value: s.text ?? "",
+        },
       });
       continue;
     }
@@ -110,4 +114,3 @@ export function planProceduralProbe(req: RequirementIR): Probe {
     steps: probeSteps,
   };
 }
-

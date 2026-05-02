@@ -20,23 +20,26 @@ export function planProbes(
   for (const req of spec.requirements) {
     let probe: Probe;
     // If the spec provides explicit steps, prefer procedural execution.
-    if ((req.preconditions?.length ?? 0) > 0 || (req.actions?.length ?? 0) > 0) {
+    if (
+      (req.preconditions?.length ?? 0) > 0 ||
+      (req.actions?.length ?? 0) > 0
+    ) {
       probe = planProceduralProbe(req);
     } else {
-    switch (req.type) {
-      case "navigation":
-        probe = planNavigationProbe(req, spec);
-        break;
-      case "form":
-        probe = planFormProbe(req);
-        break;
-      case "appearance":
-        probe = planBasicAppearanceProbe(req);
-        break;
-      default:
-        probe = planStructuralUiProbe(req);
-        break;
-    }
+      switch (req.type) {
+        case "navigation":
+          probe = planNavigationProbe(req, spec);
+          break;
+        case "form":
+          probe = planFormProbe(req);
+          break;
+        case "appearance":
+          probe = planBasicAppearanceProbe(req);
+          break;
+        default:
+          probe = planStructuralUiProbe(req);
+          break;
+      }
     }
 
     // If the cheapest probe isn't satisfiable, keep it anyway; the executor/judger will mark blocked.

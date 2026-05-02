@@ -55,9 +55,13 @@ async function withTimeout<T>(
       setTimeout(
         () =>
           reject(
-            new VerifierError("TIMEOUT", `Timed out after ${timeoutMs}ms: ${label}`, {
-              details: { timeoutMs, label },
-            }),
+            new VerifierError(
+              "TIMEOUT",
+              `Timed out after ${timeoutMs}ms: ${label}`,
+              {
+                details: { timeoutMs, label },
+              },
+            ),
           ),
         timeoutMs,
       ),
@@ -91,7 +95,10 @@ export async function executeToolCallPlan(opts: {
       args: step.args,
     });
 
-    const mk = (ok: boolean, patch?: Partial<ToolCallRecord>): ToolCallRecord => ({
+    const mk = (
+      ok: boolean,
+      patch?: Partial<ToolCallRecord>,
+    ): ToolCallRecord => ({
       id,
       runId: opts.runId,
       capability: step.capability,
@@ -152,7 +159,10 @@ export async function executeToolCallPlan(opts: {
 
         // Preserve legacy semantics: these two actions should emit dedicated artifacts
         // that downstream judges already know how to consume.
-        if (step.capability === "read_ui_structure" && step.tool === "take_snapshot") {
+        if (
+          step.capability === "read_ui_structure" &&
+          step.tool === "take_snapshot"
+        ) {
           const { snapshot, artifact } = await withTimeout(
             opts.integrations.chrome.takeSnapshot(opts.artifactStore),
             step.timeoutMs,
@@ -164,9 +174,15 @@ export async function executeToolCallPlan(opts: {
             artifactId: artifact.id,
             ...(step.label ? { label: step.label } : {}),
           };
-        } else if (step.capability === "read_visual" && step.tool === "take_screenshot") {
+        } else if (
+          step.capability === "read_visual" &&
+          step.tool === "take_screenshot"
+        ) {
           const artifact = await withTimeout(
-            opts.integrations.chrome.takeScreenshot(opts.artifactStore, step.label),
+            opts.integrations.chrome.takeScreenshot(
+              opts.artifactStore,
+              step.label,
+            ),
             step.timeoutMs,
             "take_screenshot",
           );
@@ -191,7 +207,10 @@ export async function executeToolCallPlan(opts: {
               ...(parsed !== undefined ? { parsedJson: parsed } : {}),
             };
           } else {
-            output = { response: res, ...(step.label ? { label: step.label } : {}) };
+            output = {
+              response: res,
+              ...(step.label ? { label: step.label } : {}),
+            };
           }
         }
       } else if (step.capability === "read_files") {
@@ -210,7 +229,11 @@ export async function executeToolCallPlan(opts: {
       }
 
       const artifact = opts.artifactStore.writeJson("tool_output", output, {
-        metadata: { capability: step.capability, action: step.tool, label: step.label },
+        metadata: {
+          capability: step.capability,
+          action: step.tool,
+          label: step.label,
+        },
       });
       toolCalls.push(mk(true, { outputArtifactId: artifact.id }));
       artifacts.push(artifact);
@@ -230,7 +253,9 @@ export async function executeToolCallPlan(opts: {
       const e =
         err instanceof VerifierError
           ? err
-          : new VerifierError("TOOL_UNAVAILABLE", "Step failed.", { cause: err });
+          : new VerifierError("TOOL_UNAVAILABLE", "Step failed.", {
+              cause: err,
+            });
       const artifact = opts.artifactStore.writeJson(
         "tool_output",
         { error: { code: e.code, message: e.message, details: e.details } },
@@ -263,4 +288,3 @@ export async function executeToolCallPlan(opts: {
 
   return { toolCalls, artifacts };
 }
-

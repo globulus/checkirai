@@ -40,16 +40,14 @@ function pickBestAttempt(
   attempts: Array<{ plan: TestPlanIR; validation: PlanValidationResult }>,
 ) {
   // Prefer valid; then higher score; then fewer issues; then fewer tool calls.
-  const sorted = attempts
-    .slice()
-    .sort((a, b) => {
-      if (a.validation.ok !== b.validation.ok) return a.validation.ok ? -1 : 1;
-      if (a.validation.score !== b.validation.score)
-        return b.validation.score - a.validation.score;
-      if (a.validation.issues.length !== b.validation.issues.length)
-        return a.validation.issues.length - b.validation.issues.length;
-      return a.plan.toolCalls.length - b.plan.toolCalls.length;
-    });
+  const sorted = attempts.slice().sort((a, b) => {
+    if (a.validation.ok !== b.validation.ok) return a.validation.ok ? -1 : 1;
+    if (a.validation.score !== b.validation.score)
+      return b.validation.score - a.validation.score;
+    if (a.validation.issues.length !== b.validation.issues.length)
+      return a.validation.issues.length - b.validation.issues.length;
+    return a.plan.toolCalls.length - b.plan.toolCalls.length;
+  });
   return sorted[0];
 }
 
@@ -61,8 +59,7 @@ async function generatePlanOnce(opts: {
   attempt: number;
   onSelectedModel?: (model: string) => void;
 }): Promise<{ plan: PlannerOutput; raw: string }> {
-  const system =
-    "You are a generic test planner. Produce ONLY JSON. No prose.";
+  const system = "You are a generic test planner. Produce ONLY JSON. No prose.";
 
   const prompt = [
     "You must output JSON matching this type:",
@@ -75,7 +72,7 @@ async function generatePlanOnce(opts: {
     "  notes?: string",
     "}",
     "",
-    "CapabilityName = \"navigate\"|\"read_ui_structure\"|\"read_visual\"|\"interact\"|\"read_console\"|\"read_network\"|\"read_files\"|\"run_command\"|\"call_http\"",
+    'CapabilityName = "navigate"|"read_ui_structure"|"read_visual"|"interact"|"read_console"|"read_network"|"read_files"|"run_command"|"call_http"',
     "",
     "Rules:",
     "- Only use tools that exist in the provided MCP tool list.",
@@ -163,8 +160,10 @@ export async function planWithSelfConsistency(opts: {
   const attempts = typeof opts.attempts === "number" ? opts.attempts : 5;
   const toolDescriptors = toToolDescriptors(opts.tools);
 
-  const collected: Array<{ plan: TestPlanIR; validation: PlanValidationResult }> =
-    [];
+  const collected: Array<{
+    plan: TestPlanIR;
+    validation: PlanValidationResult;
+  }> = [];
 
   for (let i = 1; i <= attempts; i++) {
     try {
@@ -174,14 +173,21 @@ export async function planWithSelfConsistency(opts: {
         targetUrl: opts.targetUrl,
         tools: opts.tools,
         attempt: i,
-        ...(opts.onSelectedModel ? { onSelectedModel: opts.onSelectedModel } : {}),
+        ...(opts.onSelectedModel
+          ? { onSelectedModel: opts.onSelectedModel }
+          : {}),
       });
       const validation = validatePlan(plan, toolDescriptors);
       collected.push({ plan, validation });
     } catch (e) {
       // Treat as invalid attempt.
       collected.push({
-        plan: { toolCalls: [], evidenceBindings: [], rubric: [], assumptions: [] },
+        plan: {
+          toolCalls: [],
+          evidenceBindings: [],
+          rubric: [],
+          assumptions: [],
+        },
         validation: {
           ok: false,
           score: 0,
@@ -199,7 +205,10 @@ export async function planWithSelfConsistency(opts: {
 
   const best = pickBestAttempt(collected);
   if (!best) {
-    throw new VerifierError("LLM_PROVIDER_ERROR", "Planner produced no attempts.");
+    throw new VerifierError(
+      "LLM_PROVIDER_ERROR",
+      "Planner produced no attempts.",
+    );
   }
   const valid = collected.filter((a) => a.validation.ok).length;
   return {
@@ -209,8 +218,9 @@ export async function planWithSelfConsistency(opts: {
       attempted: attempts,
       valid,
       chosenScore: best.validation.score,
-      issuesSample: best.validation.ok ? undefined : best.validation.issues.slice(0, 5),
+      issuesSample: best.validation.ok
+        ? undefined
+        : best.validation.issues.slice(0, 5),
     },
   };
 }
-

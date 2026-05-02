@@ -33,9 +33,9 @@ export function App() {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runGraph, setRunGraph] = useState<RunGraph | null>(null);
-  const [events, setEvents] = useState<Array<RunEvent & { _receivedAt: string }>>(
-    [],
-  );
+  const [events, setEvents] = useState<
+    Array<RunEvent & { _receivedAt: string }>
+  >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"general" | "mcp" | "ollama">("general");
@@ -101,13 +101,16 @@ export function App() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const timelineRef = useRef<HTMLDivElement | null>(null);
 
-  const log = useCallback((item: Omit<TimelineItem, "ts"> & { ts?: string }) => {
-    const ts = item.ts ?? new Date().toISOString();
-    setTimeline((prev) => {
-      const next = prev.length > 900 ? prev.slice(prev.length - 900) : prev;
-      return [...next, { ts, ...item }];
-    });
-  }, []);
+  const log = useCallback(
+    (item: Omit<TimelineItem, "ts"> & { ts?: string }) => {
+      const ts = item.ts ?? new Date().toISOString();
+      setTimeline((prev) => {
+        const next = prev.length > 900 ? prev.slice(prev.length - 900) : prev;
+        return [...next, { ts, ...item }];
+      });
+    },
+    [],
+  );
 
   const selectedRun = useMemo(
     () => runs.find((r) => r.id === selectedRunId) ?? null,
@@ -333,7 +336,12 @@ export function App() {
         const msg =
           "chrome-devtools is enabled, but chromeDevtoolsServer.command is empty. Fill it in (e.g. use the same command you pass to `checkirai chrome-devtools self-check --command ...`).";
         setError(msg);
-        log({ level: "error", title: "Blocked: missing Chrome DevTools MCP command", body: msg, source: "client" });
+        log({
+          level: "error",
+          title: "Blocked: missing Chrome DevTools MCP command",
+          body: msg,
+          source: "client",
+        });
         return;
       }
       const llm =
@@ -408,7 +416,12 @@ export function App() {
       const err = e as { message?: unknown };
       const msg = typeof err?.message === "string" ? err.message : String(e);
       setError(msg);
-      log({ level: "error", title: "verify_spec failed", body: msg, source: "client" });
+      log({
+        level: "error",
+        title: "verify_spec failed",
+        body: msg,
+        source: "client",
+      });
     } finally {
       setBusy(false);
     }
@@ -515,7 +528,9 @@ export function App() {
 
   const timelineForSelectedRun = useMemo(() => {
     const rid = selectedRunId;
-    const items = rid ? timeline.filter((t) => (t.runId ?? null) === rid) : timeline;
+    const items = rid
+      ? timeline.filter((t) => (t.runId ?? null) === rid)
+      : timeline;
     return items.slice().sort((a, b) => a.ts.localeCompare(b.ts));
   }, [selectedRunId, timeline]);
 
@@ -910,11 +925,18 @@ export function App() {
                 ? `Showing timeline for ${selectedRunId}`
                 : "No run selected — showing global activity."}
             </div>
-            <div className="events timeline" ref={timelineRef} style={{ marginTop: 8 }}>
+            <div
+              className="events timeline"
+              ref={timelineRef}
+              style={{ marginTop: 8 }}
+            >
               {timelineForSelectedRun.length ? (
                 <div className="timelineList">
                   {timelineForSelectedRun.map((t, idx) => (
-                    <div key={`${t.ts}-${idx}`} className={`timelineRow level-${t.level}`}>
+                    <div
+                      key={`${t.ts}-${idx}`}
+                      className={`timelineRow level-${t.level}`}
+                    >
                       <div className="timelineMeta">
                         <span className="timelineTs mono">{fmt(t.ts)}</span>
                         <span className="badge">{t.source}</span>
@@ -922,14 +944,17 @@ export function App() {
                       </div>
                       <div className="timelineTitle">{t.title}</div>
                       {t.body != null ? (
-                        <pre className="mono timelineBody">{safeJson(t.body)}</pre>
+                        <pre className="mono timelineBody">
+                          {safeJson(t.body)}
+                        </pre>
                       ) : null}
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="muted">
-                  No timeline entries yet. Click Run and you should see steps immediately.
+                  No timeline entries yet. Click Run and you should see steps
+                  immediately.
                 </div>
               )}
             </div>
@@ -960,9 +985,14 @@ export function App() {
               </button>
             </div>
             <div className="muted" style={{ marginTop: 6 }}>
-              Uses cached artifacts from the selected run to skip earlier phases.
+              Uses cached artifacts from the selected run to skip earlier
+              phases.
             </div>
-            <label className="muted" htmlFor="restartPhase" style={{ marginTop: 10 }}>
+            <label
+              className="muted"
+              htmlFor="restartPhase"
+              style={{ marginTop: 10 }}
+            >
               Phase
             </label>
             <select
@@ -977,11 +1007,13 @@ export function App() {
             >
               <option value="start">start (full rerun)</option>
               <option value="spec_ir">spec_ir (reuse normalized IR)</option>
-              <option value="llm_plan">llm_plan (reuse IR + cached plan)</option>
+              <option value="llm_plan">
+                llm_plan (reuse IR + cached plan)
+              </option>
             </select>
             <div className="muted" style={{ marginTop: 6 }}>
-              Note: `llm_plan` requires the cached plan to match the current Chrome
-              DevTools MCP tool surface.
+              Note: `llm_plan` requires the cached plan to match the current
+              Chrome DevTools MCP tool surface.
             </div>
           </div>
         ) : null}
@@ -1089,19 +1121,33 @@ export function App() {
               onClick={async () => {
                 setBusy(true);
                 setError(null);
-                log({ level: "info", title: "Quick action: ollama_status", source: "client" });
+                log({
+                  level: "info",
+                  title: "Quick action: ollama_status",
+                  source: "client",
+                });
                 try {
                   const out = await command("ollama_status", {
                     host: ollamaHost,
                   });
                   respond("ollama_status", out);
-                  log({ level: "success", title: "Quick action finished: ollama_status", body: out, source: "client" });
+                  log({
+                    level: "success",
+                    title: "Quick action finished: ollama_status",
+                    body: out,
+                    source: "client",
+                  });
                 } catch (e: unknown) {
                   const err = e as { message?: unknown };
                   const msg =
                     typeof err?.message === "string" ? err.message : String(e);
                   setError(msg);
-                  log({ level: "error", title: "Quick action failed: ollama_status", body: msg, source: "client" });
+                  log({
+                    level: "error",
+                    title: "Quick action failed: ollama_status",
+                    body: msg,
+                    source: "client",
+                  });
                 } finally {
                   setBusy(false);
                 }
@@ -1115,18 +1161,32 @@ export function App() {
               onClick={async () => {
                 setBusy(true);
                 setError(null);
-                log({ level: "info", title: "Quick action: refresh models", source: "client" });
+                log({
+                  level: "info",
+                  title: "Quick action: refresh models",
+                  source: "client",
+                });
                 try {
                   await refreshModelCatalog();
                   const out = await command("ollama_daemon_status", {});
                   respond("ollama_daemon_status", out);
-                  log({ level: "success", title: "Quick action finished: refresh models", body: out, source: "client" });
+                  log({
+                    level: "success",
+                    title: "Quick action finished: refresh models",
+                    body: out,
+                    source: "client",
+                  });
                 } catch (e: unknown) {
                   const err = e as { message?: unknown };
                   const msg =
                     typeof err?.message === "string" ? err.message : String(e);
                   setError(msg);
-                  log({ level: "error", title: "Quick action failed: refresh models", body: msg, source: "client" });
+                  log({
+                    level: "error",
+                    title: "Quick action failed: refresh models",
+                    body: msg,
+                    source: "client",
+                  });
                 } finally {
                   setBusy(false);
                 }
@@ -1140,20 +1200,34 @@ export function App() {
               onClick={async () => {
                 setBusy(true);
                 setError(null);
-                log({ level: "info", title: "Quick action: start Ollama", source: "client" });
+                log({
+                  level: "info",
+                  title: "Quick action: start Ollama",
+                  source: "client",
+                });
                 try {
                   const out = await command("ollama_daemon_start", {
                     host: ollamaHost,
                   });
                   await refreshModelCatalog();
                   respond("ollama_daemon_start", out);
-                  log({ level: "success", title: "Quick action finished: start Ollama", body: out, source: "client" });
+                  log({
+                    level: "success",
+                    title: "Quick action finished: start Ollama",
+                    body: out,
+                    source: "client",
+                  });
                 } catch (e: unknown) {
                   const err = e as { message?: unknown };
                   const msg =
                     typeof err?.message === "string" ? err.message : String(e);
                   setError(msg);
-                  log({ level: "error", title: "Quick action failed: start Ollama", body: msg, source: "client" });
+                  log({
+                    level: "error",
+                    title: "Quick action failed: start Ollama",
+                    body: msg,
+                    source: "client",
+                  });
                 } finally {
                   setBusy(false);
                 }
@@ -1167,18 +1241,32 @@ export function App() {
               onClick={async () => {
                 setBusy(true);
                 setError(null);
-                log({ level: "info", title: "Quick action: stop Ollama", source: "client" });
+                log({
+                  level: "info",
+                  title: "Quick action: stop Ollama",
+                  source: "client",
+                });
                 try {
                   const out = await command("ollama_daemon_stop", {});
                   await refreshModelCatalog();
                   respond("ollama_daemon_stop", out);
-                  log({ level: "success", title: "Quick action finished: stop Ollama", body: out, source: "client" });
+                  log({
+                    level: "success",
+                    title: "Quick action finished: stop Ollama",
+                    body: out,
+                    source: "client",
+                  });
                 } catch (e: unknown) {
                   const err = e as { message?: unknown };
                   const msg =
                     typeof err?.message === "string" ? err.message : String(e);
                   setError(msg);
-                  log({ level: "error", title: "Quick action failed: stop Ollama", body: msg, source: "client" });
+                  log({
+                    level: "error",
+                    title: "Quick action failed: stop Ollama",
+                    body: msg,
+                    source: "client",
+                  });
                 } finally {
                   setBusy(false);
                 }

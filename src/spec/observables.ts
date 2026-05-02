@@ -16,7 +16,10 @@ function deDupe(exps: ObservableExpectationIR[]): ObservableExpectationIR[] {
 
 export function getExpectedObservables(
   spec: Pick<SpecIR, "acceptance_policy">,
-  req: Pick<RequirementIR, "expected_observables" | "expected_observables_sets">,
+  req: Pick<
+    RequirementIR,
+    "expected_observables" | "expected_observables_sets"
+  >,
 ): ObservableExpectationIR[] {
   const mode: ObservableDetailMode =
     spec.acceptance_policy?.observable_detail ?? "detailed";
@@ -27,12 +30,15 @@ export function getExpectedObservables(
   const generic = sets.generic ?? [];
   const detailed = sets.detailed ?? [];
 
-  if (mode === "generic") return generic.length ? generic : req.expected_observables ?? [];
-  if (mode === "detailed") return detailed.length ? detailed : req.expected_observables ?? [];
+  if (mode === "generic")
+    return generic.length ? generic : (req.expected_observables ?? []);
+  if (mode === "detailed")
+    return detailed.length ? detailed : (req.expected_observables ?? []);
   return deDupe([
     ...(generic.length ? generic : []),
     ...(detailed.length ? detailed : []),
-    ...((req.expected_observables ?? []).length ? (req.expected_observables ?? []) : []),
+    ...((req.expected_observables ?? []).length
+      ? (req.expected_observables ?? [])
+      : []),
   ]);
 }
-

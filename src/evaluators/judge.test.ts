@@ -8,7 +8,11 @@ import type { SpecIR } from "../spec/ir.js";
 import type { ToolCallRecord } from "../executors/types.js";
 import { judgeDeterministic } from "./judge.js";
 
-function mkToolOutputArtifact(root: string, id: string, body: unknown): ArtifactRef {
+function mkToolOutputArtifact(
+  root: string,
+  id: string,
+  body: unknown,
+): ArtifactRef {
   const relPath = `tool_output/${id}.json`;
   const abs = join(root, relPath);
   mkdirSync(join(root, "tool_output"), { recursive: true });
@@ -43,7 +47,11 @@ function mkPlan(reqId: string, probeId: string): ProbePlan {
   };
 }
 
-function mkToolCall(runId: string, probeId: string, outputArtifactId: string): ToolCallRecord {
+function mkToolCall(
+  runId: string,
+  probeId: string,
+  outputArtifactId: string,
+): ToolCallRecord {
   return {
     id: "tc-1",
     runId,
@@ -76,10 +84,16 @@ describe("judgeDeterministic", () => {
           source_text: "Dashboard should show the current time of day",
           type: "structure",
           priority: "must",
-          expected_observables: [{ kind: "text_present", text: "the current time of day" }],
+          expected_observables: [
+            { kind: "text_present", text: "the current time of day" },
+          ],
         },
       ],
-      acceptance_policy: { strictness: "balanced", allow_model_assist: true, observable_detail: "detailed" },
+      acceptance_policy: {
+        strictness: "balanced",
+        allow_model_assist: true,
+        observable_detail: "detailed",
+      },
     };
 
     const out = judgeDeterministic({
@@ -115,7 +129,11 @@ describe("judgeDeterministic", () => {
           expected_observables: [{ kind: "time_present" }],
         },
       ],
-      acceptance_policy: { strictness: "balanced", allow_model_assist: true, observable_detail: "detailed" },
+      acceptance_policy: {
+        strictness: "balanced",
+        allow_model_assist: true,
+        observable_detail: "detailed",
+      },
     };
 
     const out = judgeDeterministic({
@@ -160,7 +178,11 @@ describe("judgeDeterministic", () => {
           ],
         },
       ],
-      acceptance_policy: { strictness: "balanced", allow_model_assist: true, observable_detail: "detailed" },
+      acceptance_policy: {
+        strictness: "balanced",
+        allow_model_assist: true,
+        observable_detail: "detailed",
+      },
     };
 
     const plan = mkPlan(reqId, probeId);
@@ -183,7 +205,8 @@ describe("judgeDeterministic", () => {
     });
 
     expect(out[0]?.verdict).toBe("fail");
-    expect(out[0]?.why_failed_or_blocked ?? "").toContain("Buttons did not match");
+    expect(out[0]?.why_failed_or_blocked ?? "").toContain(
+      "Buttons did not match",
+    );
   });
 });
-

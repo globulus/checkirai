@@ -58,7 +58,8 @@ export class McpToolClient {
       if (t.description) out.description = t.description;
       // MCP spec includes JSON schema for tool input.
       // We pass it through so the planner can generate valid arguments.
-      if ("inputSchema" in t) out.inputSchema = (t as { inputSchema?: unknown }).inputSchema;
+      if ("inputSchema" in t)
+        out.inputSchema = (t as { inputSchema?: unknown }).inputSchema;
       return out;
     });
   }

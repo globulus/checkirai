@@ -34,7 +34,7 @@ function isLikelySpecEcho(snapshotText: string, expectedText: string): boolean {
   const specMarkers = [
     "input spec ir",
     "markdown spec:",
-    "\"prompt\":",
+    '"prompt":',
     "convert the markdown spec below into json",
   ];
   const markerIdx = indexOfAny(snap, specMarkers);
@@ -241,7 +241,8 @@ export function judgeDeterministic(input: JudgeInput): RequirementResult[] {
         if (!snapshotText.toLowerCase().includes(e.role.toLowerCase()))
           failures.push(`Missing role: "${e.role}"`);
       } else if (e.kind === "time_present") {
-        if (!checkTimePresent(snapshotText)) failures.push("No time-like string found in visible UI.");
+        if (!checkTimePresent(snapshotText))
+          failures.push("No time-like string found in visible UI.");
       } else if (
         e.kind === "element_visible" &&
         e.selector &&
@@ -254,13 +255,17 @@ export function judgeDeterministic(input: JudgeInput): RequirementResult[] {
         // computed style evidence (evaluate_script output).
         const css = (e.metadata as { css?: unknown }).css;
         const cssObj =
-          css && typeof css === "object" ? (css as Record<string, unknown>) : undefined;
+          css && typeof css === "object"
+            ? (css as Record<string, unknown>)
+            : undefined;
         const expectedBgRaw =
           typeof cssObj?.backgroundColor === "string"
             ? (cssObj.backgroundColor as string)
             : undefined;
         const expectedFgRaw =
-          typeof cssObj?.color === "string" ? (cssObj.color as string) : undefined;
+          typeof cssObj?.color === "string"
+            ? (cssObj.color as string)
+            : undefined;
         const expectedColorRaw = expectedBgRaw ?? expectedFgRaw;
         if (!expectedColorRaw) {
           unchecked.push("element_visible(css)");

@@ -43,7 +43,11 @@ export async function planStepsWithLlm(opts: {
   chromeTools: McpToolDescriptor[];
 }): Promise<{
   spec: SpecIR;
-  meta: { durationMs: number; selectedModel?: string; patchedRequirements: number };
+  meta: {
+    durationMs: number;
+    selectedModel?: string;
+    patchedRequirements: number;
+  };
 }> {
   const startedAt = performance.now();
 
@@ -51,7 +55,10 @@ export async function planStepsWithLlm(opts: {
   if (opts.llm.provider !== "ollama") {
     return {
       spec: opts.spec,
-      meta: { durationMs: Math.round(performance.now() - startedAt), patchedRequirements: 0 },
+      meta: {
+        durationMs: Math.round(performance.now() - startedAt),
+        patchedRequirements: 0,
+      },
     };
   }
 
@@ -75,13 +82,13 @@ export async function planStepsWithLlm(opts: {
     "  notes?: string",
     "}",
     "",
-    "Step = { kind: \"navigate\"|\"wait\"|\"click\"|\"type\"|\"fill\"|\"press\"|\"assert\"|\"tool_call\", selector?: string, text?: string, key?: string, ms?: number, tool?: string, toolArgs?: object, notes?: string }",
+    'Step = { kind: "navigate"|"wait"|"click"|"type"|"fill"|"press"|"assert"|"tool_call", selector?: string, text?: string, key?: string, ms?: number, tool?: string, toolArgs?: object, notes?: string }',
     "",
     "Rules:",
     "- Prefer deterministic steps that can be executed via Chrome DevTools MCP.",
     "- Navigation is handled once per session by the executor bootstrap; only add kind=navigate if you truly need a different URL mid-test.",
     "- For visible_state assertions, add kind=wait using text to wait for key UI text before snapshotting.",
-    "- If an assertion references a section title (e.g. \"Recent runs\"), add wait_for that exact text.",
+    '- If an assertion references a section title (e.g. "Recent runs"), add wait_for that exact text.',
     "- Use kind=tool_call to collect evidence required for judging, e.g.:",
     "  - tool_call { tool:'take_screenshot' } for appearance/layout checks",
     "  - tool_call { tool:'evaluate_script', toolArgs:{function:'() => ...'} } to extract computed styles or text",
@@ -127,10 +134,14 @@ export async function planStepsWithLlm(opts: {
   try {
     raw = JSON.parse(gen.response);
   } catch (cause) {
-    throw new VerifierError("LLM_PROVIDER_ERROR", "LLM step planner returned non-JSON.", {
-      cause,
-      details: { responsePreview: gen.response.slice(0, 500) },
-    });
+    throw new VerifierError(
+      "LLM_PROVIDER_ERROR",
+      "LLM step planner returned non-JSON.",
+      {
+        cause,
+        details: { responsePreview: gen.response.slice(0, 500) },
+      },
+    );
   }
 
   const patch: PlannedSpecPatch = PlannedSpecPatchSchema.parse(raw);
@@ -154,7 +165,9 @@ export async function planStepsWithLlm(opts: {
       id: r.id,
       preconditions: [
         // Navigation is handled once per session by the executor bootstrap.
-        ...(expectedText ? [{ kind: "wait" as const, text: expectedText }] : []),
+        ...(expectedText
+          ? [{ kind: "wait" as const, text: expectedText }]
+          : []),
       ],
       actions: [],
     });
@@ -186,4 +199,3 @@ export async function planStepsWithLlm(opts: {
     },
   };
 }
-

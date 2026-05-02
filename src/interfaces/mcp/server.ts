@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import pino from "pino";
 import * as z from "zod/v4";
 import { buildCapabilityGraph } from "../../capabilities/registry.js";
+import { VerificationResultSchema } from "../../core/result.js";
 import { LlmPolicySchema } from "../../llm/types.js";
 import {
   createOpsContext,
@@ -20,11 +21,14 @@ import {
   verifySpec,
 } from "../../ops/index.js";
 import { planProbes } from "../../planners/planner.js";
+import { ProbePlanSchema } from "../../planners/types.js";
 import { SpecBundleSchema } from "../../spec/bundle.js";
 import { SpecIRSchema } from "../../spec/ir.js";
+import { getRun } from "../../persistence/repo/runRepo.js";
 import { normalizeMarkdownToSpecIRWithLlm } from "../../spec/normalize.js";
 
-const logger = pino({ name: "checkirai-mcp" });
+/** MCP uses stdout for JSON-RPC only; logs must go to stderr. */
+const logger = pino({ name: "checkirai-mcp" }, pino.destination(2));
 
 export async function startMcpServer(opts?: { outDir?: string }) {
   const outRoot = opts?.outDir ?? ".verifier";
@@ -34,7 +38,7 @@ export async function startMcpServer(opts?: { outDir?: string }) {
     { name: "checkirai", version: "0.1.0" },
     {
       instructions:
-        "Verify a target implementation against a spec. Use verify_spec for full runs, and ollama/model tools to manage local models.",
+        "Verify a target implementation against a spec: verify_spec for full runs, restart_verify_spec to continue from a prior run (spec_ir or llm_plan). Use ollama/model tools to manage local models.",
     },
   );
 
@@ -204,11 +208,11 @@ export async function startMcpServer(opts?: { outDir?: string }) {
       description: "Plan probes for a spec without executing them.",
       inputSchema: {
         specMarkdown: z.string().optional(),
-        spec: z.any().optional(),
+        spec: SpecIRSchema.optional(),
         tools: z.string().optional(),
-        llm: z.any().optional(),
+        llm: LlmPolicySchema.optional(),
       },
-      outputSchema: z.any(),
+      outputSchema: ProbePlanSchema,
     },
     async ({ specMarkdown, spec, tools, llm }) => {
       const llmPolicy = LlmPolicySchema.parse(llm ?? { provider: "ollama" });
@@ -239,18 +243,121 @@ export async function startMcpServer(opts?: { outDir?: string }) {
   );
 
   server.registerTool(
+    "restart_verify_spec",
+    {
+      description:
+        "Start a new verification run that reuses artifacts from a parent run: restart from phase spec_ir (skip spec normalization) or llm_plan (reuse spec IR and replan). Inherits target URL and LLM defaults from the parent when omitted.",
+      inputSchema: {
+        parentRunId: z
+          .string()
+          .describe(
+            "Completed parent run UUID (same as restartFromRunId on verify_spec).",
+          ),
+        restartFromPhase: z
+          .enum(["spec_ir", "llm_plan"])
+          .describe(
+            "spec_ir: reuse saved Spec IR from parent; llm_plan: reuse Spec IR and run planning/execution again (requires chrome-devtools + LLM, same as verify_spec).",
+          ),
+        targetUrl: z
+          .string()
+          .optional()
+          .describe("Override target; default is parent run target_base_url."),
+        tools: z.string().optional(),
+        outDir: z.string().optional(),
+        llm: LlmPolicySchema.optional().describe(
+          "Override LLM policy; default is inferred from parent run (ollama model/host defaults).",
+        ),
+        chromeDevtoolsServer: z
+          .object({
+            command: z.string(),
+            args: z.array(z.string()).optional(),
+            cwd: z.string().optional(),
+          })
+          .optional(),
+      },
+      outputSchema: VerificationResultSchema,
+    },
+    async ({
+      parentRunId,
+      restartFromPhase,
+      targetUrl,
+      tools,
+      outDir,
+      llm,
+      chromeDevtoolsServer,
+    }) => {
+      const parentId = parentRunId.trim();
+      const parent = getRun(ctx.db, parentId);
+      if (!parent) {
+        throw new Error(`Unknown parent runId: ${parentId}`);
+      }
+      const phase = RestartFromPhaseSchema.parse(restartFromPhase);
+      const effectiveTarget = (
+        targetUrl?.trim() || parent.target_base_url
+      ).trim();
+      if (!effectiveTarget) {
+        throw new Error(
+          "Parent run has no target_base_url; pass targetUrl explicitly.",
+        );
+      }
+      const llmPolicy = llm
+        ? LlmPolicySchema.parse(llm)
+        : LlmPolicySchema.parse({
+            provider:
+              parent.llm_provider === "remote" ||
+              parent.llm_provider === "none" ||
+              parent.llm_provider === "ollama"
+                ? parent.llm_provider
+                : "ollama",
+            ollamaModel:
+              parent.llm_provider === "ollama" && parent.llm_model
+                ? parent.llm_model
+                : "auto",
+          });
+
+      const verifyInput = {
+        targetUrl: effectiveTarget,
+        tools: tools ?? "fs,http",
+        outDir: outDir ?? outRoot,
+        llm: llmPolicy,
+        restartFromPhase: phase,
+        restartFromRunId: parentId,
+        ...(chromeDevtoolsServer
+          ? {
+              chromeDevtoolsServer: {
+                command: chromeDevtoolsServer.command,
+                ...(chromeDevtoolsServer.args
+                  ? { args: chromeDevtoolsServer.args }
+                  : {}),
+                ...(chromeDevtoolsServer.cwd
+                  ? { cwd: chromeDevtoolsServer.cwd }
+                  : {}),
+              },
+            }
+          : {}),
+      } satisfies VerifySpecInput;
+
+      const { result } = await verifySpec(ctx, verifyInput);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+  );
+
+  server.registerTool(
     "verify_spec",
     {
       description:
-        "Run verification against a spec and target, returning a structured VerificationResult.",
+        "Run verification against a spec and target, returning a structured VerificationResult. To reuse a prior run’s Spec IR or replan, pass restartFromPhase (spec_ir | llm_plan) with restartFromRunId, or call restart_verify_spec.",
       inputSchema: {
         specMarkdown: z.string().optional(),
-        spec: z.any().optional(),
-        specBundle: z.any().optional(),
+        spec: SpecIRSchema.optional(),
+        specBundle: SpecBundleSchema.optional(),
         targetUrl: z.string(),
         tools: z.string().optional(),
         outDir: z.string().optional(),
-        llm: z.any().optional(),
+        llm: LlmPolicySchema.optional(),
         chromeDevtoolsServer: z
           .object({
             command: z.string(),
@@ -261,7 +368,7 @@ export async function startMcpServer(opts?: { outDir?: string }) {
         restartFromPhase: z.enum(["start", "spec_ir", "llm_plan"]).optional(),
         restartFromRunId: z.string().optional(),
       },
-      outputSchema: z.any(),
+      outputSchema: VerificationResultSchema,
     },
     async ({
       specMarkdown,

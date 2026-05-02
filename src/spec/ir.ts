@@ -71,7 +71,9 @@ export const ExpectedObservablesSetSchema = z.object({
   generic: z.array(ObservableExpectationSchema).default([]),
   detailed: z.array(ObservableExpectationSchema).default([]),
 });
-export type ExpectedObservablesSet = z.infer<typeof ExpectedObservablesSetSchema>;
+export type ExpectedObservablesSet = z.infer<
+  typeof ExpectedObservablesSetSchema
+>;
 
 export const RequirementIRSchema = z.object({
   id: z.string(),

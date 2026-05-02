@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * MCP server entrypoint (stdio). Use `pnpm mcp` from the repo root, or point
- * Cursor’s MCP config at this file via `pnpm exec` / `node --import tsx`.
+ * MCP server entrypoint (stdio). From the repo root: `pnpm mcp` (terminal),
+ * or in Cursor prefer an absolute path to `dist/src/interfaces/mcp/bin.js` (after `pnpm build`;
+ * some hosts ignore `cwd` for relative args)
+ * or `pnpm --silent mcp` so nothing else writes to stdout (MCP JSON-RPC only).
  */
 import { startMcpServer } from "./server.js";
 

@@ -29,11 +29,15 @@ type LlmJudgment = {
   repair_hint?: string;
 };
 
-function normalizeJudgment(raw: z.infer<typeof LlmJudgmentLooseSchema>): LlmJudgment {
+function normalizeJudgment(
+  raw: z.infer<typeof LlmJudgmentLooseSchema>,
+): LlmJudgment {
   const verdictStr =
     typeof raw.verdict === "string" ? raw.verdict.toLowerCase().trim() : "";
   const verdict =
-    verdictStr === "pass" || verdictStr === "fail" || verdictStr === "inconclusive"
+    verdictStr === "pass" ||
+    verdictStr === "fail" ||
+    verdictStr === "inconclusive"
       ? (verdictStr as z.infer<typeof LlmVerdictSchema>)
       : "inconclusive";
 
@@ -43,15 +47,23 @@ function normalizeJudgment(raw: z.infer<typeof LlmJudgmentLooseSchema>): LlmJudg
       : typeof raw.confidence === "string"
         ? Number(raw.confidence)
         : 0.5;
-  const confidence = Number.isFinite(confNum) ? Math.max(0, Math.min(1, confNum)) : 0.5;
+  const confidence = Number.isFinite(confNum)
+    ? Math.max(0, Math.min(1, confNum))
+    : 0.5;
 
-  const why = typeof raw.why === "string" && raw.why.trim() ? raw.why.trim() : undefined;
+  const why =
+    typeof raw.why === "string" && raw.why.trim() ? raw.why.trim() : undefined;
   const repair_hint =
     typeof raw.repair_hint === "string" && raw.repair_hint.trim()
       ? raw.repair_hint.trim()
       : undefined;
 
-  return { verdict, confidence, ...(why ? { why } : {}), ...(repair_hint ? { repair_hint } : {}) };
+  return {
+    verdict,
+    confidence,
+    ...(why ? { why } : {}),
+    ...(repair_hint ? { repair_hint } : {}),
+  };
 }
 
 export type LlmJudgeSecondPassInput = {
@@ -91,7 +103,9 @@ function collectEvidence(opts: {
     }
   }
 
-  const calls = opts.toolCalls.filter((t) => t.probeId && probeIds.includes(t.probeId));
+  const calls = opts.toolCalls.filter(
+    (t) => t.probeId && probeIds.includes(t.probeId),
+  );
   const artifactsById = new Map(opts.artifacts.map((a) => [a.id, a] as const));
 
   const toolOutputArtifacts = calls
@@ -129,7 +143,9 @@ function sanitizeExpected(exps: unknown): unknown {
   // Some upstream JSON encoders turn `\b` into a literal backspace (U+0008).
   // For regex-based expectations, normalize that back to a portable escape sequence.
   try {
-    const arr = Array.isArray(exps) ? (exps as Array<Record<string, unknown>>) : [];
+    const arr = Array.isArray(exps)
+      ? (exps as Array<Record<string, unknown>>)
+      : [];
     return arr.map((e) => {
       const pattern = e.pattern;
       if (typeof pattern === "string" && pattern.includes("\u0008")) {
@@ -152,7 +168,9 @@ function tryDeterministicSecondPass(opts: {
   const exps = Array.isArray(opts.expected)
     ? (opts.expected as Array<Record<string, unknown>>)
     : [];
-  const patExp = exps.find((e) => e.kind === "text_present" && typeof e.pattern === "string");
+  const patExp = exps.find(
+    (e) => e.kind === "text_present" && typeof e.pattern === "string",
+  );
   if (patExp && opts.snapshotText) {
     const pattern = String(patExp.pattern);
     try {
@@ -171,13 +189,17 @@ function tryDeterministicSecondPass(opts: {
   }
 
   // 2) Button color checks via evaluate_script.parsedJson evidence
-  if (/\bbuttons?\b/i.test(opts.requirementText) && /\bgreen\b/i.test(opts.requirementText)) {
+  if (
+    /\bbuttons?\b/i.test(opts.requirementText) &&
+    /\bgreen\b/i.test(opts.requirementText)
+  ) {
     const parsedArrays: unknown[] = [];
     for (const t of opts.toolOutputs) {
       const pj = (t as { parsedJson?: unknown } | null)?.parsedJson;
       if (Array.isArray(pj)) parsedArrays.push(pj);
     }
-    const rows = (parsedArrays[0] as Array<Record<string, unknown>> | undefined) ?? [];
+    const rows =
+      (parsedArrays[0] as Array<Record<string, unknown>> | undefined) ?? [];
     if (rows.length) {
       const colors = rows
         .map((r) => (typeof r.color === "string" ? r.color : ""))
@@ -260,10 +282,14 @@ async function judgeOneWithOllama(opts: {
   try {
     raw = JSON.parse(gen.response);
   } catch (cause) {
-    throw new VerifierError("LLM_PROVIDER_ERROR", "LLM judge returned non-JSON.", {
-      cause,
-      details: { responsePreview: gen.response.slice(0, 500) },
-    });
+    throw new VerifierError(
+      "LLM_PROVIDER_ERROR",
+      "LLM judge returned non-JSON.",
+      {
+        cause,
+        details: { responsePreview: gen.response.slice(0, 500) },
+      },
+    );
   }
   const loose = LlmJudgmentLooseSchema.parse(raw);
   return normalizeJudgment(loose);
@@ -286,7 +312,9 @@ export async function judgeLlmSecondPass(
   const { selectedModel } = await ensureModelAvailable(input.llm);
   opts?.onSelectedModel?.(selectedModel);
 
-  const byReqId = new Map(seedResults.map((r) => [r.requirement_id, r] as const));
+  const byReqId = new Map(
+    seedResults.map((r) => [r.requirement_id, r] as const),
+  );
 
   for (const reqId of input.requirementIds) {
     const base = byReqId.get(reqId);
@@ -343,7 +371,9 @@ export async function judgeLlmSecondPass(
       confidence: llmJudgment.confidence,
       judgment_mode: "model_assisted",
       ...(llmJudgment.why ? { why_failed_or_blocked: llmJudgment.why } : {}),
-      ...(llmJudgment.repair_hint ? { repair_hint: llmJudgment.repair_hint } : {}),
+      ...(llmJudgment.repair_hint
+        ? { repair_hint: llmJudgment.repair_hint }
+        : {}),
     });
   }
 
@@ -354,4 +384,3 @@ export async function judgeLlmSecondPass(
     meta: { durationMs: Math.round(performance.now() - startedAt) },
   };
 }
-
