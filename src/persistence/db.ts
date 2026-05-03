@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 
 export type Db = Database.Database;
 
+/** Must stay aligned with [schema.sql](schema.sql); used when `schema.sql` is missing from dist. */
 const EMBEDDED_SCHEMA_SQL = `PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
@@ -96,15 +97,17 @@ export function openDb(dbPath: string): Db {
 export function migrate(db: Db) {
   const here = dirname(fileURLToPath(import.meta.url));
   const schemaPath = resolve(here, "schema.sql");
-  const sql = (() => {
-    try {
-      return readFileSync(schemaPath, "utf8");
-    } catch {
-      // When running from a compiled `dist/` tree, `schema.sql` might not be copied
-      // by `tsc`. Fall back to an embedded schema so the CLI can still run.
-      return EMBEDDED_SCHEMA_SQL;
+  let sql: string;
+  try {
+    sql = readFileSync(schemaPath, "utf8");
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      sql = EMBEDDED_SCHEMA_SQL;
+    } else {
+      throw e;
     }
-  })();
+  }
   db.exec(sql);
   ensureRunLineageColumns(db);
 }

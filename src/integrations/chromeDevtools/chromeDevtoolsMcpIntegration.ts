@@ -122,6 +122,25 @@ export class ChromeDevtoolsMcpIntegration {
     await this.call("navigate_page", { type: "url", url });
   }
 
+  /** Best-effort current page URL via `evaluate_script` (for deterministic `url_matches`). */
+  async getCurrentUrl(): Promise<string | undefined> {
+    try {
+      const res = await this.call("evaluate_script", {
+        function: "() => location.href",
+      });
+      const t = extractText(res).trim();
+      const quoted = t.match(
+        /"((?:https?:\/\/|file:\/\/)[^"\s]+)"|'((?:https?:\/\/|file:\/\/)[^'\s]+)'/,
+      );
+      if (quoted?.[1]) return quoted[1];
+      if (quoted?.[2]) return quoted[2];
+      if (/^https?:\/\//i.test(t)) return t.split(/\s+/)[0];
+      return t.replace(/^[`'"]+|[`'"]+$/g, "").trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async takeSnapshot(
     store: ArtifactStore,
   ): Promise<{ snapshot: ChromeSnapshot; artifact: ArtifactRef }> {

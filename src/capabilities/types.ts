@@ -16,4 +16,8 @@ export const CapabilityNameSchema = z.enum([
 ]);
 export type CapabilityName = z.infer<typeof CapabilityNameSchema>;
 
+/** All capability string ids (for policies, UI, and exhaustiveness checks). */
+export const ALL_CAPABILITY_NAMES: readonly CapabilityName[] =
+  CapabilityNameSchema.options;
+
 export type CapabilitySet = Set<CapabilityName>;

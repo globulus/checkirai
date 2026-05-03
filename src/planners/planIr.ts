@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CapabilityNameSchema, type CapabilityName } from "./types.js";
+import { type CapabilityName, CapabilityNameSchema } from "./types.js";
 
 /**
  * Generic LLM-produced plan IR.

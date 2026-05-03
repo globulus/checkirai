@@ -8,16 +8,18 @@ _|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""| {======|_|"""""|_|"""""
 
 > **Local LLMs + MCP-backed tools** to parse specs, plan probes, collect evidence and return requirement-level verdicts—without paying cloud token or request costs for every verification pass.
 
-**Checkir AI** is a spec-driven verification runtime: it reads a human-readable spec, plans probes, runs tools (including MCP-backed capabilities) and returns **requirement-level verdicts** — pass, fail, inconclusive, or blocked — with evidence you can inspect offline. The default LLM stack is **Ollama** on your machine; tool hosts connect over **MCP** the same way Cursor talks to other servers.
+**Checkir AI** is a spec-driven verification runtime: it reads a human-readable spec, plans probes, runs tools (including MCP-backed capabilities) and returns **requirement-level verdicts** — pass, fail, inconclusive, or blocked — with evidence you can inspect offline. LLM-assisted phases default to **Ollama** on your machine; you can also use a **`remote`** provider (OpenAI-compatible HTTP API) for normalization and judging. Tool hosts connect over **MCP** the same way Cursor or Claude Code talks to other servers.
 
 ---
 
 ## Why?
 
 - **Tokens and API calls add up.** Re-running the same “does the UI match the spec?” loop through a cloud model is slow and expensive.
-- **Local-first verification** keeps sensitive URLs, traces, and artifacts on your machine while still using an LLM where judgment helps (planning, interpretation).
+- **Local-first verification** keeps sensitive URLs, traces, and artifacts on your machine while still using an LLM where judgment helps (planning, interpretation). Optional **remote** LLMs use your API key and base URL (see `docs/USAGE.md` and `checkirai.config.json`) - but the main idea is still to be able to run this locally.
 - **Repeatable runs** write structured reports, SQLite state and artifacts under a known output root—ideal for CI, dashboards and agent loops.
 - **CLI and MCP as the integration surface** lets Cursor, Claude Code and other hosts treat verification as a first-class tool alongside Chrome DevTools, filesystem, etc.
+
+Note that doing the same task (spec-based software verification using tools) with a remote agent is almost certainly going to be faster, but **each and every run incurrs a cost local checks don't**. Plus, unlike with a remote agent, you only need to do the spec -> IR -> executive plan pipeline once: the local artifacts allow you to re-run the judgement/verification phase solely, further conserving resources.
 
 ---
 
@@ -45,8 +47,8 @@ _|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""| {======|_|"""""|_|"""""
 ### 1. Clone and install dependencies
 
 ```bash
-git clone <repository-url>
-cd localtest   # or your clone directory name
+git clone https://github.com/globulus/checkirai
+cd checkirai
 pnpm install
 ```
 
@@ -77,13 +79,17 @@ checkirai --help
 
 ### 3. Optional project config
 
-Copy or edit `checkirai.config.json` in your project root for defaults (target URL, tools, Ollama host/model, and MCP server definitions such as `chrome-devtools`).
+Copy or edit `checkirai.config.json` (or `.checkirai/config.json`) in your project root for:
+
+- **`defaults`** — `targetUrl`, `tools`, `outRoot`, plus runtime tuning: `maxRunMs`, `runCommandAllowlist` (prefix with `*` or full command line; **empty means no `run_command` runs**), `stepRetries`, `stepRetryDelayMs`, `isolateProbeSessions` (one session per probe), `artifactMaxRuns` (prune old per-run artifact folders).
+- **`llm`** — `provider` (`ollama` \| `remote` \| `none`), Ollama host/model, or **`remoteBaseUrl`**, **`remoteApiKey`**, **`remoteModel`** for OpenAI-compatible APIs.
+- **`mcpServers`** — e.g. `chrome-devtools` with `command` / `args` so **`checkirai verify`** can spawn Chrome DevTools MCP when `--tools` includes `chrome-devtools`.
 
 ---
 
 ## Web dashboard
 
-The repo ships a **local web UI** plus a small API so you can kick off runs, watch progress, and browse results without living only in the terminal.
+The repo ships a **local web UI** plus a small API so you can kick off runs, watch progress, and browse results without living only in the terminal. **`checkirai.config.json`** **`defaults`** (timeouts, `runCommandAllowlist`, retries, isolation, artifact pruning) are merged server-side for runs started from the API. See **`docs/USAGE.md`** for a dashboard caveat: the bundled UI always sends an **`llm`** body; for **`remote`** / **`none`** it currently sends only **`{ "provider": "…" }`**, which **replaces** the file’s **`llm`** for that request—use **CLI or MCP** with a full **`llm`** object (or extend the web client) until the UI merges project policy.
 
 | Mode                        | Command          | Notes                                                                        |
 | --------------------------- | ---------------- | ---------------------------------------------------------------------------- |
@@ -103,19 +109,19 @@ Top-level program: **`checkirai`** (aliases in `package.json`: `spec-driven-veri
 
 Verify a target URL against a markdown spec (or restart from a previous run).
 
-| Option                                       | Description                                                                                         |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `--spec <path>`                              | Path to spec markdown (required unless restarting from `spec_ir` / `llm_plan` with `--restart-run`) |
-| `--target <url>`                             | Base URL of the app under test (**required**)                                                       |
-| `--tools <list>`                             | Comma-separated: `playwright-mcp`, `shell`, `fs`, `http`, `chrome-devtools` (default `fs,http`)     |
-| `--out <dir>`                                | Output root (default `.verifier`)                                                                   |
-| `--policy <name>`                            | `read_only` or `ui_only`                                                                            |
-| `--llm-provider <p>`                         | `ollama`, `remote`, or `none` (default `ollama`)                                                    |
-| `--ollama-host <url>`                        | Default `http://127.0.0.1:11434`                                                                    |
-| `--ollama-model <name>`                      | Model name or `auto`                                                                                |
-| `--allow-auto-pull` / `--no-allow-auto-pull` | Allow pulling missing Ollama models                                                                 |
-| `--restart-from <phase>`                     | `start` · `spec_ir` · `llm_plan`                                                                    |
-| `--restart-run <runId>`                      | Parent run UUID when restarting                                                                     |
+| Option                                       | Description                                                                                                                                                                                                                  |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--spec <path>`                              | Path to spec markdown (required unless restarting from `spec_ir` / `llm_plan` with `--restart-run`)                                                                                                                          |
+| `--target <url>`                             | Base URL of the app under test (**required**)                                                                                                                                                                                |
+| `--tools <list>`                             | Comma-separated: `playwright-mcp`, `shell`, `fs`, `http`, `chrome-devtools` (default `fs,http`)                                                                                                                              |
+| `--out <dir>`                                | Output root (default `.verifier`)                                                                                                                                                                                            |
+| `--policy <name>`                            | `read_only` or `ui_only`                                                                                                                                                                                                     |
+| `--llm-provider <p>`                         | `ollama`, `remote`, or `none` (default `ollama`). For **`remote`**, set `remoteBaseUrl`, `remoteApiKey`, and `remoteModel` in **`checkirai.config.json`** (`llm` section)—the CLI does not pass secrets on the command line. |
+| `--ollama-host <url>`                        | Default `http://127.0.0.1:11434`                                                                                                                                                                                             |
+| `--ollama-model <name>`                      | Model name or `auto`                                                                                                                                                                                                         |
+| `--allow-auto-pull` / `--no-allow-auto-pull` | Allow pulling missing Ollama models                                                                                                                                                                                          |
+| `--restart-from <phase>`                     | `start` · `spec_ir` · `llm_plan`                                                                                                                                                                                             |
+| `--restart-run <runId>`                      | Parent run UUID when restarting                                                                                                                                                                                              |
 
 **Exit codes:** `0` pass · `1` fail · `2` inconclusive · `3` blocked.
 
@@ -210,13 +216,13 @@ For end-to-end examples, probe output layout, and integration notes, **`docs/USA
 
 ## Architecture overview
 
-End-to-end, a run is a **pipeline** from natural-language intent to a frozen result. The local LLM is used where structure and judgment are needed; deterministic code handles orchestration, policies, and parts of scoring.
+End-to-end, a run is a **pipeline** from natural-language intent to a frozen result. An LLM (**Ollama** by default, or **`remote`**) is used where structure and judgment are needed; deterministic code handles orchestration, policies, and parts of scoring.
 
 1. **Spec in** — Markdown file, **Spec bundle** (inline markdown + URLs + files resolved to text), or a pre-built **Spec IR** object.
-2. **Normalize → Spec IR** — A local LLM turns prose into a structured intermediate representation: requirements, observables, and metadata the rest of the system consumes. Outputs are **persisted** (e.g. `spec_ir` artifacts) so a run is auditable and replayable.
-3. **Plan → test plan** — The planner consults the **capability graph** for your `--tools` set (HTTP, filesystem, shell, Playwright / Chrome DevTools MCP, …). A local LLM (and/or procedural planners) produces executable steps or probes aligned with those tools—not a generic script ignoring what is actually available.
-4. **Execute** — Tool calls run against the **target URL** under the chosen **policy** (e.g. read-only vs UI-oriented). Evidence lands in the artifact store and DB.
-5. **Judge & synthesize** — **Deterministic checks** and **LLM judges** assign per-requirement verdicts (`pass` / `fail` / `inconclusive` / `blocked`), then the runtime emits `report.json`, `summary.md`, and related rows for the dashboard and MCP tools.
+2. **Normalize → Spec IR** — The configured LLM turns prose into a structured intermediate representation: requirements, observables, and metadata the rest of the system consumes. Outputs are **persisted** (e.g. `spec_ir` artifacts) so a run is auditable and replayable.
+3. **Plan → test plan** — The planner consults the **capability graph** for your `--tools` set (HTTP, filesystem, shell, Playwright / Chrome DevTools MCP, …). An LLM (and/or procedural planners) produces executable steps or probes aligned with those tools—not a generic script ignoring what is actually available.
+4. **Execute** — The executor **bootstraps navigation** to the run’s target URL when Chrome + `navigate` are available (so snapshots are not taken against whatever tab was already open). Between probes it can **reset** to that URL again to shed UI mutations; optional **`isolateProbeSessions`** uses one session per probe. **`run_command`** is allowlist-gated (default deny if the list is empty). Optional **timeouts** and **step retries** cap hung or flaky work.
+5. **Judge & synthesize** — **Deterministic checks** (including more observable kinds, URL from the page, HTTP evidence where present) and **LLM judges** (Ollama or **remote**) assign per-requirement verdicts (`pass` / `fail` / `inconclusive` / `blocked`). Optional **`depends_on`** on a requirement blocks dependents when a prerequisite fails. The runtime emits `report.json`, `summary.md`, and related rows for the dashboard and MCP tools.
 
 ```mermaid
 flowchart LR

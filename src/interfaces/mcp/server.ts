@@ -20,11 +20,11 @@ import {
   type VerifySpecInput,
   verifySpec,
 } from "../../ops/index.js";
+import { getRun } from "../../persistence/repo/runRepo.js";
 import { planProbes } from "../../planners/planner.js";
 import { ProbePlanSchema } from "../../planners/types.js";
 import { SpecBundleSchema } from "../../spec/bundle.js";
 import { SpecIRSchema } from "../../spec/ir.js";
-import { getRun } from "../../persistence/repo/runRepo.js";
 import { normalizeMarkdownToSpecIRWithLlm } from "../../spec/normalize.js";
 
 /** MCP uses stdout for JSON-RPC only; logs must go to stderr. */

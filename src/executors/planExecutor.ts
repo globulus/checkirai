@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { ArtifactStore } from "../artifacts/store.js";
 import type { ArtifactRef } from "../artifacts/types.js";
 import type { CapabilitySet } from "../capabilities/types.js";
-import { assertPolicyAllows, getPolicy } from "../policies/policy.js";
-import { VerifierError } from "../shared/errors.js";
 import type { RunEventSink } from "../ops/events.js";
 import type { ToolCallIR } from "../planners/planIr.js";
+import { assertPolicyAllows, getPolicy } from "../policies/policy.js";
+import { VerifierError } from "../shared/errors.js";
 import type { ExecutorIntegrations } from "./integrations.js";
 import type { ToolCallRecord } from "./types.js";
 

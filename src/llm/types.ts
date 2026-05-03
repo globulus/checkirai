@@ -11,6 +11,8 @@ export const LlmPolicySchema = z.object({
   ollamaModel: z.string().default("auto"),
   remoteBaseUrl: z.string().optional(),
   remoteApiKey: z.string().optional(),
+  /** OpenAI-compatible chat model id when provider is `remote`. */
+  remoteModel: z.string().optional(),
 });
 export type LlmPolicy = z.infer<typeof LlmPolicySchema>;
 

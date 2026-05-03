@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { RequirementIR } from "../../spec/ir.js";
-import type { SpecIR } from "../../spec/ir.js";
+import type { RequirementIR, SpecIR } from "../../spec/ir.js";
 import { getExpectedObservables } from "../../spec/observables.js";
 import type { Probe } from "../types.js";
 

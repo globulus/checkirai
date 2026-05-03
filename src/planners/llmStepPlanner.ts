@@ -1,11 +1,11 @@
 import { performance } from "node:perf_hooks";
 import { z } from "zod";
-import type { LlmPolicy } from "../llm/types.js";
 import { ensureModelAvailable } from "../llm/modelOps.js";
 import { ollamaGenerate } from "../llm/ollamaHttp.js";
+import type { LlmPolicy } from "../llm/types.js";
 import type { McpToolDescriptor } from "../mcp/client.js";
 import { VerifierError } from "../shared/errors.js";
-import { StepSchema, type SpecIR, SpecIRSchema } from "../spec/ir.js";
+import { type SpecIR, SpecIRSchema, StepSchema } from "../spec/ir.js";
 
 const PlannedRequirementSchema = z.object({
   id: z.string(),

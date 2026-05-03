@@ -1,18 +1,23 @@
+import { performance } from "node:perf_hooks";
 import { ensureModelAvailable } from "../llm/modelOps.js";
 import { ollamaGenerate } from "../llm/ollamaHttp.js";
+import { remoteChatCompletion } from "../llm/remoteOpenAIClient.js";
 import type { LlmPolicy } from "../llm/types.js";
-import { performance } from "node:perf_hooks";
 import { VerifierError } from "../shared/errors.js";
 import {
   type ObservableExpectationIR,
   type SpecIR,
   SpecIRSchema,
 } from "./ir.js";
+import {
+  OBSERVABLE_KINDS_PROMPT,
+  REQUIREMENT_TYPES_PROMPT,
+} from "./llmPromptConstants.js";
 
 export type SpecNormalizationMeta =
   | {
       mode: "heuristic";
-      provider: "none" | "ollama" | "other";
+      provider: "none" | "ollama" | "remote" | "other";
       selectedModel?: string;
       durationMs: number;
       specChars: number;
@@ -26,6 +31,14 @@ export type SpecNormalizationMeta =
       specChars: number;
       usedFallbackHeuristics: boolean;
       retriedWithFallbackModel: boolean;
+    }
+  | {
+      mode: "remote";
+      provider: "remote";
+      selectedModel: string;
+      durationMs: number;
+      specChars: number;
+      usedFallbackHeuristics: boolean;
     };
 
 function extractQuotedStrings(s: string): string[] {
@@ -81,6 +94,83 @@ function deriveGenericObservablesFromSource(
   return needles
     .filter(Boolean)
     .map((text) => ({ kind: "text_present" as const, text }));
+}
+
+function normalizationSystem(): string {
+  return [
+    "You are a spec normalizer for an automated verification engine.",
+    "Output: a single JSON object matching SpecIR. No markdown fences, no commentary, no trailing text.",
+    "Goal: each bullet becomes a requirement with typed, checkable observables—never paraphrase dynamic UI state as a literal text_present string unless the UI is supposed to show that exact phrase.",
+  ].join(" ");
+}
+
+function buildNormalizationPrompt(markdownTrimmed: string): string {
+  return [
+    "Convert the markdown spec below into JSON that matches this TypeScript type:",
+    "",
+    `SpecIR = {`,
+    `  run_goal: string,`,
+    `  requirements: Array<{`,
+    `    id: string,`,
+    `    source_text: string,`,
+    `    type: ${REQUIREMENT_TYPES_PROMPT},`,
+    `    priority: "must"|"should"|"could",`,
+    `    expected_observables_sets?: {`,
+    `      generic: Array<Observable>,`,
+    `      detailed: Array<Observable>`,
+    `    },`,
+    `    expected_observables: Array<{`,
+    `      kind: ${OBSERVABLE_KINDS_PROMPT},`,
+    `      selector?: string, role?: string, text?: string, url?: string, pattern?: string, metadata?: object`,
+    `    }>,`,
+    `    notes?: string`,
+    `  }>,`,
+    `  acceptance_policy: { strictness: "strict"|"balanced"|"lenient", allow_model_assist: boolean, observable_detail?: "generic"|"detailed"|"both" }`,
+    `}`,
+    "",
+    "Rules:",
+    "- Always produce at least one expected_observable per requirement.",
+    "- Prefer producing BOTH: expected_observables_sets.generic and expected_observables_sets.detailed.",
+    "- In generic, prefer text_present/role_present/url_matches (avoid brittle CSS selectors).",
+    "- In detailed, include selectors and metadata when it improves precision.",
+    "- DYNAMIC / DERIVED UI STATE: If the bullet asks for something that changes over time (clock, 'current time', 'today’s date', live counters), do NOT use text_present for a descriptive sentence about that fact.",
+    "  Use kind='time_present' (no extra fields) when the intent is 'a clock or formatted time is visible'. Set type='visible_state'.",
+    "  If the spec names an exact string that must appear verbatim, text_present is appropriate.",
+    "- APPEARANCE / STYLING: For colors, spacing, typography, layout, set type='appearance' and use kind='element_visible' with selector plus metadata.css.",
+    "  For solid buttons ('buttons are green'), prefer metadata.css.backgroundColor with the named color, not text_present and not css.color alone.",
+    "  Never satisfy a styling requirement with text_present of the color word or a made-up sentence like 'Buttons are green'.",
+    "- If a bullet says '(intentional fail)', set priority='could'.",
+    "- Keep source_text as the bullet text (without the leading dash).",
+    "- Output JSON only.",
+    "",
+    "Examples (shape only; ids and run_goal in your answer must cover the full MARKDOWN SPEC):",
+    "",
+    "Bullet: Dashboard should show the current time of day",
+    "Good requirement:",
+    `{"id":"req-10","source_text":"Dashboard should show the current time of day","type":"visible_state","priority":"must","expected_observables":[{"kind":"time_present"}],"expected_observables_sets":{"generic":[{"kind":"time_present"}],"detailed":[{"kind":"time_present"}]}}`,
+    "",
+    "Bullet: Primary buttons should use a green background",
+    "Good requirement:",
+    `{"id":"req-9","source_text":"Primary buttons should use a green background","type":"appearance","priority":"must","expected_observables":[{"kind":"element_visible","selector":"button","metadata":{"css":{"backgroundColor":"green"}}}],"expected_observables_sets":{"generic":[{"kind":"element_visible","selector":"button"}],"detailed":[{"kind":"element_visible","selector":"button","metadata":{"css":{"backgroundColor":"green"}}}]}}`,
+    "",
+    "MARKDOWN SPEC:",
+    markdownTrimmed,
+  ].join("\n");
+}
+
+function finalizeParsedSpecIr(raw: unknown): SpecIR {
+  const parsed = SpecIRSchema.parse(raw);
+  return ensureDualObservableSets(
+    SpecIRSchema.parse({
+      ...parsed,
+      requirements: parsed.requirements.map((r) =>
+        postProcessRequirement({
+          ...r,
+          ...(r.notes ? { notes: r.notes } : {}),
+        }),
+      ),
+    }),
+  );
 }
 
 function ensureDualObservableSets(spec: SpecIR): SpecIR {
@@ -214,8 +304,8 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   llm: LlmPolicy,
   opts?: {
     onLlmCall?: (e: {
-      provider: "ollama";
-      host: string;
+      provider: "ollama" | "remote";
+      host?: string;
       model: string;
       system?: string;
       prompt: string;
@@ -235,7 +325,9 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   const maxPromptChars = Math.max(0, opts?.maxPromptChars ?? 20_000);
   const maxResponseChars = Math.max(0, opts?.maxResponseChars ?? 20_000);
 
-  const heuristic = (provider: SpecNormalizationMeta["provider"]) => {
+  const heuristic = (
+    provider: "none" | "ollama" | "remote" | "other",
+  ): { specIr: SpecIR; meta: SpecNormalizationMeta } => {
     const specIr = ensureDualObservableSets(
       normalizeMarkdownToSpecIR(markdown),
     );
@@ -255,8 +347,79 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   if (llm.provider === "none") {
     return heuristic("none");
   }
+
+  if (llm.provider === "remote") {
+    if (markdown.length > 40_000) {
+      return heuristic("other");
+    }
+    if (!llm.remoteBaseUrl?.trim() || !llm.remoteApiKey?.trim()) {
+      return heuristic("other");
+    }
+    const system = normalizationSystem();
+    const prompt = buildNormalizationPrompt(markdown.trim());
+    const model = llm.remoteModel?.trim() || "gpt-4o-mini";
+    let responseText: string;
+    const tRemote = performance.now();
+    try {
+      const out = await remoteChatCompletion({
+        baseUrl: llm.remoteBaseUrl.trim(),
+        apiKey: llm.remoteApiKey.trim(),
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0,
+      });
+      responseText = out.content;
+    } catch {
+      return heuristic("other");
+    }
+    const durRemote = Math.max(0, Math.round(performance.now() - tRemote));
+    opts?.onLlmCall?.({
+      provider: "remote",
+      host: llm.remoteBaseUrl,
+      model,
+      system,
+      prompt:
+        prompt.length > maxPromptChars
+          ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)`
+          : prompt,
+      responseText:
+        responseText.length > maxResponseChars
+          ? `${responseText.slice(0, maxResponseChars)}\n…(truncated)`
+          : responseText,
+      durationMs: durRemote,
+      promptChars: prompt.length,
+      responseChars: responseText.length,
+      truncated: {
+        prompt: prompt.length > maxPromptChars,
+        response: responseText.length > maxResponseChars,
+      },
+      phase: "spec_normalization",
+    });
+    let raw: unknown;
+    try {
+      raw = JSON.parse(responseText);
+    } catch {
+      return heuristic("other");
+    }
+    const specIr = finalizeParsedSpecIr(raw);
+    const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+    return {
+      specIr,
+      meta: {
+        mode: "remote",
+        provider: "remote",
+        selectedModel: model,
+        durationMs,
+        specChars,
+        usedFallbackHeuristics: false,
+      },
+    };
+  }
+
   if (llm.provider !== "ollama") {
-    // MVP only: Ollama is our local structured-output provider.
     return heuristic("other");
   }
 
@@ -268,63 +431,8 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
 
   const { selectedModel } = await ensureModelAvailable(llm);
 
-  const system = [
-    "You are a spec normalizer for an automated verification engine.",
-    "Output: a single JSON object matching SpecIR. No markdown fences, no commentary, no trailing text.",
-    "Goal: each bullet becomes a requirement with typed, checkable observables—never paraphrase dynamic UI state as a literal text_present string unless the UI is supposed to show that exact phrase.",
-  ].join(" ");
-
-  const prompt = [
-    "Convert the markdown spec below into JSON that matches this TypeScript type:",
-    "",
-    `SpecIR = {`,
-    `  run_goal: string,`,
-    `  requirements: Array<{`,
-    `    id: string,`,
-    `    source_text: string,`,
-    `    type: "structure"|"navigation"|"form"|"persistence"|"visible_state"|"appearance"|"accessibility"|"integration",`,
-    `    priority: "must"|"should"|"could",`,
-    `    expected_observables_sets?: {`,
-    `      generic: Array<Observable>,`,
-    `      detailed: Array<Observable>`,
-    `    },`,
-    `    expected_observables: Array<{`,
-    `      kind: "text_present"|"role_present"|"url_matches"|"element_visible"|"element_enabled"|"time_present"|"toast_present"|"network_request"|"http_response"|"file_contains",`,
-    `      selector?: string, role?: string, text?: string, url?: string, pattern?: string, metadata?: object`,
-    `    }>,`,
-    `    notes?: string`,
-    `  }>,`,
-    `  acceptance_policy: { strictness: "strict"|"balanced"|"lenient", allow_model_assist: boolean, observable_detail?: "generic"|"detailed"|"both" }`,
-    `}`,
-    "",
-    "Rules:",
-    "- Always produce at least one expected_observable per requirement.",
-    "- Prefer producing BOTH: expected_observables_sets.generic and expected_observables_sets.detailed.",
-    "- In generic, prefer text_present/role_present/url_matches (avoid brittle CSS selectors).",
-    "- In detailed, include selectors and metadata when it improves precision.",
-    "- DYNAMIC / DERIVED UI STATE: If the bullet asks for something that changes over time (clock, 'current time', 'today’s date', live counters), do NOT use text_present for a descriptive sentence about that fact.",
-    "  Use kind='time_present' (no extra fields) when the intent is 'a clock or formatted time is visible'. Set type='visible_state'.",
-    "  If the spec names an exact string that must appear verbatim, text_present is appropriate.",
-    "- APPEARANCE / STYLING: For colors, spacing, typography, layout, set type='appearance' and use kind='element_visible' with selector plus metadata.css.",
-    "  For solid buttons ('buttons are green'), prefer metadata.css.backgroundColor with the named color, not text_present and not css.color alone.",
-    "  Never satisfy a styling requirement with text_present of the color word or a made-up sentence like 'Buttons are green'.",
-    "- If a bullet says '(intentional fail)', set priority='could'.",
-    "- Keep source_text as the bullet text (without the leading dash).",
-    "- Output JSON only.",
-    "",
-    "Examples (shape only; ids and run_goal in your answer must cover the full MARKDOWN SPEC):",
-    "",
-    "Bullet: Dashboard should show the current time of day",
-    "Good requirement:",
-    `{"id":"req-10","source_text":"Dashboard should show the current time of day","type":"visible_state","priority":"must","expected_observables":[{"kind":"time_present"}],"expected_observables_sets":{"generic":[{"kind":"time_present"}],"detailed":[{"kind":"time_present"}]}}`,
-    "",
-    "Bullet: Primary buttons should use a green background",
-    "Good requirement:",
-    `{"id":"req-9","source_text":"Primary buttons should use a green background","type":"appearance","priority":"must","expected_observables":[{"kind":"element_visible","selector":"button","metadata":{"css":{"backgroundColor":"green"}}}],"expected_observables_sets":{"generic":[{"kind":"element_visible","selector":"button"}],"detailed":[{"kind":"element_visible","selector":"button","metadata":{"css":{"backgroundColor":"green"}}}]}}`,
-    "",
-    "MARKDOWN SPEC:",
-    markdown.trim(),
-  ].join("\n");
+  const system = normalizationSystem();
+  const prompt = buildNormalizationPrompt(markdown.trim());
 
   const generateOnce = async (model: string) =>
     await ollamaGenerate(llm.ollamaHost, {
@@ -336,7 +444,7 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
       options: { temperature: 0 },
     });
 
-  let gen: Awaited<ReturnType<typeof ollamaGenerate>>;
+  let gen: Awaited<ReturnType<typeof ollamaGenerate>> | undefined;
   let retriedWithFallbackModel = false;
   try {
     const t0 = performance.now();
@@ -411,6 +519,10 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
     }
   }
 
+  if (!gen) {
+    return heuristic("ollama");
+  }
+
   let raw: unknown;
   try {
     raw = JSON.parse(gen.response);
@@ -419,20 +531,7 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
     return heuristic("ollama");
   }
 
-  const parsed = SpecIRSchema.parse(raw);
-
-  // Post-process to prevent obviously-wrong observable encodings.
-  const specIr = ensureDualObservableSets(
-    SpecIRSchema.parse({
-      ...parsed,
-      requirements: parsed.requirements.map((r) =>
-        postProcessRequirement({
-          ...r,
-          ...(r.notes ? { notes: r.notes } : {}),
-        }),
-      ),
-    }),
-  );
+  const specIr = finalizeParsedSpecIr(raw);
 
   const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
   return {

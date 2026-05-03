@@ -1,18 +1,18 @@
 import { performance } from "node:perf_hooks";
-import { z } from "zod";
-import type { LlmPolicy } from "../llm/types.js";
+import type { z } from "zod";
 import { ensureModelAvailable } from "../llm/modelOps.js";
 import { ollamaGenerate } from "../llm/ollamaHttp.js";
 import { remoteChatCompletion } from "../llm/remoteOpenAIClient.js";
+import type { LlmPolicy } from "../llm/types.js";
+import type { McpToolDescriptor } from "../mcp/client.js";
 import { VerifierError } from "../shared/errors.js";
 import type { SpecIR } from "../spec/ir.js";
-import type { McpToolDescriptor } from "../mcp/client.js";
 import {
-  TestPlanIRSchema,
-  validatePlan,
   type PlanValidationResult,
   type TestPlanIR,
+  TestPlanIRSchema,
   type ToolDescriptor,
+  validatePlan,
 } from "./planIr.js";
 
 const PlannerOutputSchema = TestPlanIRSchema;

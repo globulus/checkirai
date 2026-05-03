@@ -8,7 +8,7 @@ It runs as:
 - **MCP server (stdio)** — for Cursor and other hosts that speak the Model Context Protocol  
 - **Web dashboard** — API + UI for interactive runs and progress  
 
-Execution is **policy-gated** (e.g. read-only vs UI-oriented). LLM-assisted phases default to **Ollama** on your machine. The pipeline is wired end-to-end (normalize → plan → execute → judge → synthesize); some probes and browser automation paths are still evolving—treat edge verdicts and tooling as improving over time.
+Execution is **policy-gated** (e.g. read-only vs UI-oriented). LLM-assisted phases default to **Ollama** on your machine; you can switch to a **`remote`** OpenAI-compatible API via **`checkirai.config.json`** (see below). The pipeline is wired end-to-end (normalize → plan → execute → judge → synthesize). **`run_command`** is **allowlist-only** (empty list means shell steps never run). Some probes and browser automation paths are still evolving—treat edge verdicts and tooling as improving over time.
 
 **Requirements:** Node.js **22+**, **pnpm**. Optional: Ollama, Playwright browsers if you use `playwright-mcp` in `--tools`.
 
@@ -71,6 +71,8 @@ checkirai verify \
 
 **Other useful `verify` flags:** `--policy read_only|ui_only`, `--llm-provider ollama|remote|none`, `--ollama-host`, `--ollama-model`, `--restart-from start|spec_ir|llm_plan` with `--restart-run <parentRunId>` to reuse artifacts from a previous run.
 
+**Timeouts, retries, shell allowlist, probe isolation, artifact pruning:** set these under **`defaults`** in **`checkirai.config.json`** (or `.checkirai/config.json`)—they are merged for CLI, web API, and MCP runs (see **Project configuration**). There is no separate CLI flag for every knob yet.
+
 ### Outputs
 
 - SQLite: `<out>/verifier.sqlite`  
@@ -90,19 +92,55 @@ checkirai verify \
 
 ## Project configuration (`checkirai.config.json`)
 
-At the repo root (or `.checkirai/config.json`), you can set defaults and MCP subprocess definitions:
+At the repo root (or `.checkirai/config.json`), you can set defaults, LLM policy, and MCP subprocess definitions. The CLI, web API, and MCP server merge **`defaults`** and other relevant fields when starting a run.
 
-- **`defaults`** — e.g. `targetUrl`, `tools`, `outRoot` (used by the **web API** when fields are omitted)  
-- **`llm`** — Ollama host, model, `allowAutoPull`, etc.  
-- **`mcpServers`** — e.g. `chrome-devtools` with `command` / `args` so **`checkirai verify`** can spawn Chrome DevTools MCP when `--tools` includes `chrome-devtools`  
+| Section | Purpose |
+| ------- | ------- |
+| **`defaults`** | `targetUrl`, `tools`, `outRoot` (web API uses these when the request omits a field). Also: **`maxRunMs`** (overall cap), **`runCommandAllowlist`** (string prefixes or full command lines; use `"*"` only if you trust every probe; **omit or `[]` = no `run_command` execution**), **`stepRetries`** / **`stepRetryDelayMs`**, **`isolateProbeSessions`** (fresh browser session per probe when supported), **`artifactMaxRuns`** (keep only the newest N per-run artifact directories under `artifacts/`). |
+| **`llm`** | `provider`: `ollama` \| `remote` \| `none`. Ollama: `ollamaHost`, `ollamaModel`, `allowAutoPull`, etc. **Remote:** `remoteBaseUrl`, `remoteApiKey`, `remoteModel` (OpenAI-compatible chat completions). Prefer env-backed secrets in your own deployment; the file is plain JSON. |
+| **`mcpServers`** | e.g. `chrome-devtools` with `command` / `args` / `cwd` / `env` so **`checkirai verify`** can spawn Chrome DevTools MCP when `--tools` includes `chrome-devtools`. |
 
-The CLI loads this file from the current working directory for Chrome DevTools integration; the dashboard loads it for defaults and server-side behavior.
+The CLI loads this file from the current working directory. The dashboard loads it for **merged defaults** and Chrome DevTools spawn configuration.
+
+---
+
+## Remote LLM example (`llm.provider: "remote"`)
+
+```json
+{
+  "version": 1,
+  "llm": {
+    "provider": "remote",
+    "remoteBaseUrl": "https://api.example.com/v1",
+    "remoteApiKey": "sk-…",
+    "remoteModel": "gpt-4.1-mini",
+    "allowAutoPull": false
+  },
+  "defaults": {
+    "maxRunMs": 900000,
+    "runCommandAllowlist": ["pnpm test*", "npm run build"],
+    "isolateProbeSessions": false
+  }
+}
+```
+
+Use **`--llm-provider remote`** on the CLI only together with this file; the CLI does not accept API keys on the command line.
+
+---
+
+## Spec IR: `depends_on`
+
+When you pass structured **`spec`** (or restart from **`spec_ir`**), each requirement may include **`depends_on`**: an array of other requirement **`id`** strings that must **pass** before that requirement is judged. If a dependency fails or is blocked, dependents are marked **blocked** without re-running their probes. See `RequirementIRSchema` in **`src/spec/ir.ts`**.
 
 ---
 
 ## Web dashboard
 
 Local UI + API for starting runs, streaming events, and browsing history.
+
+**Merged behavior:** The API merges **`defaults`** from the project file into each **`verify_spec`** request (e.g. `tools`, `outDir`, timeouts, allowlist, retries, isolation, artifact pruning) when the JSON body omits those fields.
+
+**LLM from the UI:** The form sends a full Ollama policy when **Ollama** is selected. For **`remote`** or **`none`**, the client currently sends only `{ "provider": "…" }`, which **replaces** the file’s `llm` object for that request—so **remote credentials in `checkirai.config.json` are not used** unless you extend the UI (or call the API without overriding `llm`). Practical options: keep **Ollama** in the dashboard and use **`remote`** from the CLI/MCP with a proper `llm` payload, or add form fields / merge logic in the web client later.
 
 ### Development (API + Vite)
 
@@ -310,10 +348,12 @@ Common optional fields:
 | `targetUrl`              | Required base URL of the app under test |
 | `tools`                  | Comma-separated tool set (default `fs,http`) |
 | `outDir`                 | Output root (defaults to server’s root, usually `.verifier`) |
-| `llm`                    | e.g. `{ "provider": "ollama", "ollamaHost": "http://127.0.0.1:11434", "ollamaModel": "auto", "allowAutoPull": true }` |
+| `llm`                    | Full **`LlmPolicy`**: e.g. Ollama as below, or **`remote`** with `remoteBaseUrl`, `remoteApiKey`, `remoteModel` |
 | `chromeDevtoolsServer`   | `{ "command": "...", "args": ["..."], "cwd": "..." }` to spawn Chrome DevTools MCP for this run (CLI can also read `checkirai.config.json`) |
 | `restartFromPhase`       | `spec_ir` or `llm_plan` (not `start`) |
 | `restartFromRunId`       | Parent run UUID when restarting |
+
+**Merged from project `defaults` (not exposed as MCP `verify_spec` tool arguments today):** `maxRunMs`, `runCommandAllowlist`, `stepRetries`, `stepRetryDelayMs`, `isolateProbeSessions`, `artifactMaxRuns`. Put them in **`checkirai.config.json`** → **`defaults`** so CLI, web API, and MCP runs all pick them up. The **web** `/api/commands/verify_spec` body does not yet map these keys from JSON into `VerifySpecInput`; the shipped React UI has no fields for them—**file defaults are the supported path** for the dashboard.
 
 For a focused restart call, **`restart_verify_spec`** accepts **`parentRunId`** (same UUID), **`restartFromPhase`** (`spec_ir` \| `llm_plan`), and optional overrides; see the tool description in the MCP host.
 
@@ -329,6 +369,22 @@ For a focused restart call, **`restart_verify_spec`** accepts **`parentRunId`** 
     "ollamaHost": "http://127.0.0.1:11434",
     "ollamaModel": "auto",
     "allowAutoPull": true
+  }
+}
+```
+
+Remote policy shape (when not relying on `checkirai.config.json`):
+
+```json
+{
+  "targetUrl": "http://localhost:3000",
+  "specMarkdown": "- Page loads",
+  "tools": "fs,http,chrome-devtools",
+  "llm": {
+    "provider": "remote",
+    "remoteBaseUrl": "https://api.openai.com/v1",
+    "remoteApiKey": "sk-…",
+    "remoteModel": "gpt-4.1-mini"
   }
 }
 ```

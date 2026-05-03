@@ -25,8 +25,8 @@ export {
   getRunGraph,
 } from "./reportOps.js";
 export {
-  RestartFromPhaseSchema,
   type RestartFromPhase,
+  RestartFromPhaseSchema,
   type VerifySpecInput,
   verifySpec,
 } from "./verifyOps.js";

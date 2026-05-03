@@ -6,8 +6,26 @@ import type { RunEventSink } from "../ops/events.js";
 import type { Probe, ProbePlan, ProbeStep } from "../planners/types.js";
 import { assertPolicyAllows, getPolicy } from "../policies/policy.js";
 import { VerifierError } from "../shared/errors.js";
+import { isRunCommandAllowlisted } from "../shared/runCommandAllowlist.js";
 import type { ExecutorIntegrations } from "./integrations.js";
 import type { ToolCallRecord } from "./types.js";
+
+function delay(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+type RunStepContext = {
+  runId: string;
+  probeId?: string;
+  capabilities: CapabilitySet;
+  integrations: ExecutorIntegrations;
+  store: ArtifactStore;
+  policyName: "read_only" | "ui_only";
+  onEvent?: RunEventSink;
+  abortSignal?: AbortSignal;
+  /** When empty or undefined, all `run_command` steps are denied. */
+  runCommandAllowlist?: string[];
+};
 
 export type ExecutionOutput = {
   toolCalls: ToolCallRecord[];
@@ -49,19 +67,24 @@ function tryParseJsonFence(text: string): unknown | undefined {
 }
 
 async function runStep(
-  runId: string,
-  probeId: string | undefined,
-  capabilities: CapabilitySet,
-  integrations: ExecutorIntegrations,
-  store: ArtifactStore,
   step: ProbeStep,
-  policyName: "read_only" | "ui_only",
-  onEvent?: RunEventSink,
+  ctx: RunStepContext,
 ): Promise<{
   toolCall: ToolCallRecord;
   artifacts: ArtifactRef[];
   output?: unknown;
 }> {
+  const {
+    runId,
+    probeId,
+    capabilities,
+    integrations,
+    store,
+    policyName,
+    onEvent,
+    abortSignal,
+    runCommandAllowlist,
+  } = ctx;
   const id = randomUUID();
   const startedAt = nowIso();
 
@@ -104,6 +127,7 @@ async function runStep(
   };
 
   try {
+    abortSignal?.throwIfAborted();
     if (!capabilities.has(step.capability)) {
       throw new VerifierError(
         "TOOL_UNAVAILABLE",
@@ -131,7 +155,8 @@ async function runStep(
             "HTTP integration not configured.",
           );
         const url = String(step.args?.url ?? "");
-        output = await integrations.http.get(url);
+        const resHttp = await integrations.http.get(url);
+        output = { ...resHttp, url };
         break;
       }
       case "navigate": {
@@ -161,9 +186,11 @@ async function runStep(
         } else {
           const { snapshot, artifact } =
             await integrations.chrome.takeSnapshot(store);
+          const pageUrl = await integrations.chrome.getCurrentUrl();
           output = {
             snapshotText: snapshot.snapshotText,
             artifactId: artifact.id,
+            ...(pageUrl ? { pageUrl } : {}),
           };
         }
         break;
@@ -301,6 +328,15 @@ async function runStep(
         const args = Array.isArray(step.args?.args)
           ? (step.args?.args as string[])
           : [];
+        if (
+          !isRunCommandAllowlisted(runCommandAllowlist ?? [], command, args)
+        ) {
+          throw new VerifierError(
+            "POLICY_BLOCKED",
+            "run_command is not allowlisted. Set runCommandAllowlist (prefix with * for prefix match).",
+            { details: { command, args } },
+          );
+        }
         const runOpts: { cwd?: string; timeoutMs?: number } = {};
         if (typeof step.args?.cwd === "string")
           runOpts.cwd = step.args.cwd as string;
@@ -347,41 +383,38 @@ async function runStep(
 }
 
 async function runProbe(
-  runId: string,
-  capabilities: CapabilitySet,
-  integrations: ExecutorIntegrations,
-  store: ArtifactStore,
   probe: Probe,
-  policyName: "read_only" | "ui_only",
-  onEvent?: RunEventSink,
+  ctx: RunStepContext & { stepRetries?: number; stepRetryDelayMs?: number },
 ): Promise<ExecutionOutput> {
   const toolCalls: ToolCallRecord[] = [];
   const artifacts: ArtifactRef[] = [];
+  const stepRetries = ctx.stepRetries ?? 0;
+  const stepRetryDelayMs = ctx.stepRetryDelayMs ?? 400;
 
-  onEvent?.({
+  ctx.onEvent?.({
     type: "probe_started",
-    runId,
+    runId: ctx.runId,
     probeId: probe.id,
     requirementId: probe.requirementId,
   });
 
+  const stepCtx: RunStepContext = { ...ctx, probeId: probe.id };
+
   for (const step of probe.steps) {
-    const res = await runStep(
-      runId,
-      probe.id,
-      capabilities,
-      integrations,
-      store,
-      step,
-      policyName,
-      onEvent,
-    );
+    let res = await runStep(step, stepCtx);
+    let attempt = 0;
+    while (!res.toolCall.ok && attempt < stepRetries) {
+      ctx.abortSignal?.throwIfAborted();
+      attempt += 1;
+      await delay(stepRetryDelayMs);
+      res = await runStep(step, stepCtx);
+    }
     toolCalls.push(res.toolCall);
     artifacts.push(...res.artifacts);
 
     const finished = {
       type: "step_finished" as const,
-      runId,
+      runId: ctx.runId,
       probeId: probe.id,
       toolCallId: res.toolCall.id,
       capability: res.toolCall.capability,
@@ -397,7 +430,7 @@ async function runProbe(
         ? { outputArtifactId: res.toolCall.outputArtifactId }
         : {}),
     };
-    onEvent?.(finished);
+    ctx.onEvent?.(finished);
   }
 
   return { toolCalls, artifacts };
@@ -417,9 +450,30 @@ export async function executePlan(opts: {
    */
   targetUrl?: string;
   onEvent?: RunEventSink;
+  abortSignal?: AbortSignal;
+  runCommandAllowlist?: string[];
+  stepRetries?: number;
+  stepRetryDelayMs?: number;
+  /**
+   * When true (default), navigate back to `targetUrl` between probes in a session
+   * to shed UI mutations from prior probes.
+   */
+  resetBetweenProbes?: boolean;
 }): Promise<ExecutionOutput> {
   const toolCalls: ToolCallRecord[] = [];
   const artifacts: ArtifactRef[] = [];
+  const baseCtx: RunStepContext = {
+    runId: opts.runId,
+    capabilities: opts.capabilities,
+    integrations: opts.integrations,
+    store: opts.artifactStore,
+    policyName: opts.policyName,
+    ...(opts.onEvent ? { onEvent: opts.onEvent } : {}),
+    ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+    ...(opts.runCommandAllowlist !== undefined
+      ? { runCommandAllowlist: opts.runCommandAllowlist }
+      : {}),
+  };
 
   for (const session of opts.plan.sessions) {
     // Session bootstrap: ensure we're on the intended page before any snapshots.
@@ -432,35 +486,54 @@ export async function executePlan(opts: {
       opts.integrations.chrome
     ) {
       const res = await runStep(
-        opts.runId,
-        undefined,
-        opts.capabilities,
-        opts.integrations,
-        opts.artifactStore,
         {
           capability: "navigate",
           action: "navigate_page",
           args: { url: opts.targetUrl },
         },
-        opts.policyName,
-        opts.onEvent,
+        baseCtx,
       );
       toolCalls.push(res.toolCall);
       artifacts.push(...res.artifacts);
     }
 
-    for (const probe of session.probes) {
-      const res = await runProbe(
-        opts.runId,
-        opts.capabilities,
-        opts.integrations,
-        opts.artifactStore,
-        probe,
-        opts.policyName,
-        opts.onEvent,
-      );
+    const probes = session.probes;
+    for (let pi = 0; pi < probes.length; pi++) {
+      opts.abortSignal?.throwIfAborted();
+      const probe = probes[pi];
+      if (!probe) continue;
+      const res = await runProbe(probe, {
+        ...baseCtx,
+        ...(typeof opts.stepRetries === "number"
+          ? { stepRetries: opts.stepRetries }
+          : {}),
+        ...(typeof opts.stepRetryDelayMs === "number"
+          ? { stepRetryDelayMs: opts.stepRetryDelayMs }
+          : {}),
+      });
       toolCalls.push(...res.toolCalls);
       artifacts.push(...res.artifacts);
+
+      const more = pi < probes.length - 1;
+      if (
+        more &&
+        opts.resetBetweenProbes !== false &&
+        typeof opts.targetUrl === "string" &&
+        opts.targetUrl.trim() &&
+        opts.capabilities.has("navigate") &&
+        opts.integrations.chrome
+      ) {
+        const nav = await runStep(
+          {
+            capability: "navigate",
+            action: "navigate_page",
+            args: { url: opts.targetUrl },
+          },
+          baseCtx,
+        );
+        toolCalls.push(nav.toolCall);
+        artifacts.push(...nav.artifacts);
+      }
     }
   }
 

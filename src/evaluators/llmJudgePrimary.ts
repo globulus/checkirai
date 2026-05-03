@@ -68,10 +68,11 @@ function sanitizeExpected(exps: unknown): unknown {
     const arr = Array.isArray(exps)
       ? (exps as Array<Record<string, unknown>>)
       : [];
+    const bs = String.fromCharCode(8);
     return arr.map((e) => {
       const pattern = e.pattern;
-      if (typeof pattern === "string" && pattern.includes("\u0008")) {
-        return { ...e, pattern: pattern.replace(/\u0008/g, "\\\\b") };
+      if (typeof pattern === "string" && pattern.includes(bs)) {
+        return { ...e, pattern: pattern.split(bs).join("\\\\b") };
       }
       return e;
     });
@@ -206,7 +207,7 @@ async function llmCallJson(opts: {
         "Remote LLM policy missing remoteBaseUrl/remoteApiKey.",
       );
     }
-    const model = opts.llm.ollamaModel || "gpt-4.1-mini";
+    const model = opts.llm.remoteModel?.trim() || "gpt-4o-mini";
     const out = await remoteChatCompletion({
       baseUrl: opts.llm.remoteBaseUrl,
       apiKey: opts.llm.remoteApiKey,
@@ -473,13 +474,14 @@ export async function judgeWithSelfConsistency(opts: {
 
     const judgments: SingleJudgment[] = [];
     for (let i = 1; i <= attempts; i++) {
+      const rubric = rubricByReq.get(r.id);
       judgments.push(
         await judgeRequirementAttempt({
           llm: opts.llm,
           attempt: i,
           requirement: { id: r.id, source_text: r.source_text },
           expected,
-          ...(rubricByReq.get(r.id) ? { rubric: rubricByReq.get(r.id)! } : {}),
+          ...(rubric !== undefined ? { rubric } : {}),
           evidence,
           ...(opts.onSelectedModel
             ? { onSelectedModel: opts.onSelectedModel }

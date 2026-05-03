@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   command,
   getChromeDevtoolsMcpConfig,
@@ -10,7 +16,6 @@ import {
   type RunRow,
   subscribeRunEvents,
 } from "./api";
-import React from "react";
 
 function fmt(ts?: string | null) {
   if (!ts) return "";

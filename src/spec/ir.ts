@@ -80,6 +80,8 @@ export const RequirementIRSchema = z.object({
   source_text: z.string(),
   type: RequirementTypeSchema,
   priority: RequirementPrioritySchema.default("must"),
+  /** Other requirement ids that must be satisfied before judging this one. */
+  depends_on: z.array(z.string()).optional(),
   preconditions: z.array(StepSchema).optional(),
   actions: z.array(StepSchema).optional(),
   expected_observables: z.array(ObservableExpectationSchema).default([]),

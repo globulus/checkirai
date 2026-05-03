@@ -18,6 +18,12 @@ export const ProjectConfigSchema = z.object({
       targetUrl: z.string().optional(),
       tools: z.string().optional(),
       outRoot: z.string().optional(),
+      maxRunMs: z.number().int().positive().optional(),
+      runCommandAllowlist: z.array(z.string()).optional(),
+      stepRetries: z.number().int().nonnegative().optional(),
+      stepRetryDelayMs: z.number().int().nonnegative().optional(),
+      isolateProbeSessions: z.boolean().optional(),
+      artifactMaxRuns: z.number().int().positive().optional(),
     })
     .optional(),
   llm: LlmPolicySchema.optional(),

@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 import type { ArtifactRef } from "../artifacts/types.js";
+import type { ToolCallRecord } from "../executors/types.js";
 import type { ProbePlan } from "../planners/types.js";
 import type { SpecIR } from "../spec/ir.js";
-import type { ToolCallRecord } from "../executors/types.js";
 import { judgeDeterministic } from "./judge.js";
 
 function mkToolOutputArtifact(
@@ -73,7 +73,7 @@ describe("judgeDeterministic", () => {
     const probeId = "probe-1";
 
     const art = mkToolOutputArtifact(root, "a1", {
-      snapshotText: `Header\nInput Spec IR\n{ "prompt": "MARKDOWN SPEC: the current time of day" }\nFooter`,
+      snapshotText: `Header\nInput Spec IR\nmarkdown spec:\n{ "prompt": "MARKDOWN SPEC: the current time of day" }\nFooter`,
     });
 
     const spec: SpecIR = {

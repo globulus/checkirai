@@ -3,8 +3,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { z } from "zod";
+import { pruneArtifactRuns } from "../artifacts/prune.js";
 import { ArtifactStore } from "../artifacts/store.js";
 import { buildCapabilityGraph } from "../capabilities/registry.js";
+import { loadProjectConfig } from "../config/projectConfig.js";
 import {
   synthesizeMarkdownSummary,
   synthesizeResult,
@@ -19,6 +21,7 @@ import { createFsIntegration } from "../integrations/fs/fsIntegration.js";
 import { createHttpIntegration } from "../integrations/http/httpIntegration.js";
 import { createShellIntegration } from "../integrations/shell/shellIntegration.js";
 import { checkOllamaRunning } from "../llm/modelOps.js";
+import { ollamaStopModel } from "../llm/ollamaCli.js";
 import { type LlmPolicy, LlmPolicySchema } from "../llm/types.js";
 import type { McpServerConfig } from "../mcp/types.js";
 import {
@@ -52,7 +55,6 @@ import type { SpecBundle } from "../spec/bundle.js";
 import { resolveSpecBundle } from "../spec/contextResolution.js";
 import { type SpecIR, SpecIRSchema } from "../spec/ir.js";
 import { normalizeMarkdownToSpecIRWithLlmDetailed } from "../spec/normalize.js";
-import { ollamaStopModel } from "../llm/ollamaCli.js";
 import type { OpsContext } from "./context.js";
 import type { RunEvent, RunEventSink } from "./events.js";
 
@@ -113,6 +115,12 @@ export type VerifySpecInput = {
   /** When not `start`, `restartFromRunId` must point to a completed parent run with saved artifacts. */
   restartFromPhase?: RestartFromPhase;
   restartFromRunId?: string;
+  maxRunMs?: number;
+  runCommandAllowlist?: string[];
+  stepRetries?: number;
+  stepRetryDelayMs?: number;
+  isolateProbeSessions?: boolean;
+  artifactMaxRuns?: number;
 };
 
 export async function verifySpec(
@@ -126,7 +134,23 @@ export async function verifySpec(
   ensureDir(runsDir);
   ensureDir(artifactsDir);
 
-  const llmPolicy = LlmPolicySchema.parse(input.llm ?? { provider: "ollama" });
+  const projectCfg = loadProjectConfig().config;
+  const def = projectCfg?.defaults;
+  const maxRunMs = input.maxRunMs ?? def?.maxRunMs;
+  const runCommandAllowlist =
+    input.runCommandAllowlist ?? def?.runCommandAllowlist;
+  const stepRetries = input.stepRetries ?? def?.stepRetries;
+  const stepRetryDelayMs = input.stepRetryDelayMs ?? def?.stepRetryDelayMs;
+  const isolateProbeSessions =
+    input.isolateProbeSessions ?? def?.isolateProbeSessions;
+  const artifactMaxRuns = input.artifactMaxRuns ?? def?.artifactMaxRuns;
+  if (typeof artifactMaxRuns === "number" && artifactMaxRuns > 0) {
+    pruneArtifactRuns(artifactsDir, artifactMaxRuns);
+  }
+
+  const llmPolicy = LlmPolicySchema.parse(
+    input.llm ?? projectCfg?.llm ?? { provider: "ollama" },
+  );
   const requestedPolicy: PolicyName = input.policyName ?? "read_only";
 
   const restartFromPhase = RestartFromPhaseSchema.parse(
@@ -164,7 +188,12 @@ export async function verifySpec(
     target_base_url: input.targetUrl,
     policy_name: null,
     llm_provider: llmPolicy.provider,
-    llm_model: llmPolicy.provider === "ollama" ? llmPolicy.ollamaModel : null,
+    llm_model:
+      llmPolicy.provider === "ollama"
+        ? llmPolicy.ollamaModel
+        : llmPolicy.provider === "remote"
+          ? (llmPolicy.remoteModel ?? null)
+          : null,
     status: "running",
     confidence: null,
     summary_md_path: null,
@@ -234,7 +263,7 @@ export async function verifySpec(
               endedAt: nowIso(),
               phase: e.phase,
               provider: e.provider,
-              host: e.host,
+              host: e.host ?? "",
               model: e.model,
               durationMs: e.durationMs,
               promptChars: e.promptChars,
@@ -292,7 +321,7 @@ export async function verifySpec(
               endedAt: nowIso(),
               phase: e.phase,
               provider: e.provider,
-              host: e.host,
+              host: e.host ?? "",
               model: e.model,
               durationMs: e.durationMs,
               promptChars: e.promptChars,
@@ -533,125 +562,147 @@ export async function verifySpec(
     }
 
     const runLegacyProbeFlow = async () => {
-      // LLM step planning (proceduralization) for legacy probes
-      if (
-        llmPolicy.provider !== "none" &&
-        (integrations as ExecutorIntegrations).chrome
-      ) {
-        try {
-          const chromeTools = await (
-            integrations as ExecutorIntegrations
-          ).chrome!.listTools();
-          const planned = await planStepsWithLlm({
-            spec: specIr!,
-            llm: llmPolicy,
-            targetUrl: input.targetUrl,
-            chromeTools,
-          });
-          specIr = planned.spec;
-        } catch {
-          // Best-effort: if planning fails, continue with non-procedural probes.
-        }
-      }
-
-      const plan = planProbes(specIr!, capGraph.capabilities);
-      const planNeedsInteract = plan.sessions.some((s) =>
-        s.probes.some((p) => p.capabilityNeeds.includes("interact")),
-      );
-      const effectivePolicy: PolicyName =
-        requestedPolicy === "read_only" && planNeedsInteract
-          ? "ui_only"
-          : requestedPolicy;
-
-      insertProbes(
-        ctx.db,
-        plan.sessions.flatMap((s) =>
-          s.probes.map((p) => ({
-            id: p.id,
-            run_id: runId,
-            requirement_id: p.requirementId,
-            strategy: p.strategy ?? null,
-            side_effects: p.sideEffects ?? null,
-            cost_hint: p.costHint ?? null,
-          })),
-        ),
-      );
-
-      const artifactStore = new ArtifactStore({ rootDir: artifactsDir, runId });
-      const execOut = await executePlan({
-        runId,
-        plan,
-        capabilities: capGraph.capabilities,
-        integrations: integrations as ExecutorIntegrations,
-        artifactStore,
-        policyName: effectivePolicy,
-        targetUrl: input.targetUrl,
-        onEvent: (e) => {
-          ctx.events.publish(e);
-          opts?.onEvent?.(e);
-        },
-      });
-
-      // Legacy judgment: deterministic + LLM second pass.
-      let requirementResults = judgeDeterministic({
-        spec: specIr!,
-        plan,
-        toolCalls: execOut.toolCalls,
-        artifacts: execOut.artifacts,
-        artifactRootDir: artifactsDir,
-      });
-
-      let llmSecondPassMeta:
-        | { attempted: number; applied: number }
-        | { attempted: number; applied: number; error: string }
-        | undefined;
-      if (llmPolicy.provider !== "none") {
-        const inconclusiveIds = requirementResults
-          .filter((r) => r.verdict === "inconclusive")
-          .map((r) => r.requirement_id);
-        if (inconclusiveIds.length) {
+      const ac = new AbortController();
+      const timer =
+        typeof maxRunMs === "number" && maxRunMs > 0
+          ? setTimeout(() => ac.abort(), maxRunMs)
+          : undefined;
+      try {
+        // LLM step planning (proceduralization) for legacy probes
+        if (
+          llmPolicy.provider !== "none" &&
+          (integrations as ExecutorIntegrations).chrome
+        ) {
           try {
-            const before = new Map(
-              requirementResults.map(
-                (r) => [r.requirement_id, r.verdict] as const,
-              ),
-            );
-            const out = await judgeLlmSecondPass(
-              {
-                spec: specIr!,
-                plan,
-                toolCalls: execOut.toolCalls,
-                artifacts: execOut.artifacts,
-                artifactRootDir: artifactsDir,
-                llm: llmPolicy,
-                requirementIds: inconclusiveIds,
-              },
-              requirementResults,
-              { onSelectedModel: recordModel },
-            );
-            requirementResults = out.results;
-            const applied = requirementResults.filter((r) => {
-              const prev = before.get(r.requirement_id);
-              return (
-                prev === "inconclusive" && r.judgment_mode === "model_assisted"
-              );
-            }).length;
-            llmSecondPassMeta = { attempted: inconclusiveIds.length, applied };
-          } catch (e) {
-            llmSecondPassMeta = {
-              attempted: inconclusiveIds.length,
-              applied: 0,
-              error: e instanceof Error ? e.message : String(e),
-            };
+            const chromeTools = await (
+              integrations as ExecutorIntegrations
+            ).chrome!.listTools();
+            const planned = await planStepsWithLlm({
+              spec: specIr!,
+              llm: llmPolicy,
+              targetUrl: input.targetUrl,
+              chromeTools,
+            });
+            specIr = planned.spec;
+          } catch {
+            // Best-effort: if planning fails, continue with non-procedural probes.
           }
         }
-      }
 
-      return {
-        execOut,
-        requirementResults,
-        meta: { llm_second_pass: llmSecondPassMeta },
-      };
+        const plan = planProbes(specIr!, capGraph.capabilities, {
+          isolateSessions: isolateProbeSessions === true,
+        });
+        const planNeedsInteract = plan.sessions.some((s) =>
+          s.probes.some((p) => p.capabilityNeeds.includes("interact")),
+        );
+        const effectivePolicy: PolicyName =
+          requestedPolicy === "read_only" && planNeedsInteract
+            ? "ui_only"
+            : requestedPolicy;
+
+        insertProbes(
+          ctx.db,
+          plan.sessions.flatMap((s) =>
+            s.probes.map((p) => ({
+              id: p.id,
+              run_id: runId,
+              requirement_id: p.requirementId,
+              strategy: p.strategy ?? null,
+              side_effects: p.sideEffects ?? null,
+              cost_hint: p.costHint ?? null,
+            })),
+          ),
+        );
+
+        const artifactStore = new ArtifactStore({
+          rootDir: artifactsDir,
+          runId,
+        });
+        const execOut = await executePlan({
+          runId,
+          plan,
+          capabilities: capGraph.capabilities,
+          integrations: integrations as ExecutorIntegrations,
+          artifactStore,
+          policyName: effectivePolicy,
+          targetUrl: input.targetUrl,
+          abortSignal: ac.signal,
+          ...(runCommandAllowlist !== undefined ? { runCommandAllowlist } : {}),
+          ...(typeof stepRetries === "number" ? { stepRetries } : {}),
+          ...(typeof stepRetryDelayMs === "number" ? { stepRetryDelayMs } : {}),
+          onEvent: (e) => {
+            ctx.events.publish(e);
+            opts?.onEvent?.(e);
+          },
+        });
+
+        // Legacy judgment: deterministic + LLM second pass.
+        let requirementResults = judgeDeterministic({
+          spec: specIr!,
+          plan,
+          toolCalls: execOut.toolCalls,
+          artifacts: execOut.artifacts,
+          artifactRootDir: artifactsDir,
+        });
+
+        let llmSecondPassMeta:
+          | { attempted: number; applied: number }
+          | { attempted: number; applied: number; error: string }
+          | undefined;
+        if (llmPolicy.provider !== "none") {
+          const inconclusiveIds = requirementResults
+            .filter((r) => r.verdict === "inconclusive")
+            .map((r) => r.requirement_id);
+          if (inconclusiveIds.length) {
+            try {
+              const before = new Map(
+                requirementResults.map(
+                  (r) => [r.requirement_id, r.verdict] as const,
+                ),
+              );
+              const out = await judgeLlmSecondPass(
+                {
+                  spec: specIr!,
+                  plan,
+                  toolCalls: execOut.toolCalls,
+                  artifacts: execOut.artifacts,
+                  artifactRootDir: artifactsDir,
+                  llm: llmPolicy,
+                  requirementIds: inconclusiveIds,
+                },
+                requirementResults,
+                { onSelectedModel: recordModel },
+              );
+              requirementResults = out.results;
+              const applied = requirementResults.filter((r) => {
+                const prev = before.get(r.requirement_id);
+                return (
+                  prev === "inconclusive" &&
+                  r.judgment_mode === "model_assisted"
+                );
+              }).length;
+              llmSecondPassMeta = {
+                attempted: inconclusiveIds.length,
+                applied,
+              };
+            } catch (e) {
+              llmSecondPassMeta = {
+                attempted: inconclusiveIds.length,
+                applied: 0,
+                error: e instanceof Error ? e.message : String(e),
+              };
+            }
+          }
+        }
+
+        return {
+          execOut,
+          requirementResults,
+          meta: { llm_second_pass: llmSecondPassMeta },
+        };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     };
 
     // Planning + persistence setup

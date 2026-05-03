@@ -76,7 +76,6 @@ function stepsToProbeSteps(steps: StepIR[]): ProbeStep[] {
         action: String(s.tool ?? ""),
         args: (s.toolArgs ?? {}) as Record<string, unknown>,
       });
-      continue;
     }
     // assert is handled by the judge; we still want evidence.
   }

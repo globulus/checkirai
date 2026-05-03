@@ -1,5 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { checkOllamaRunning } from "../llm/modelOps.js";
 import type { OpsContext } from "./context.js";
 

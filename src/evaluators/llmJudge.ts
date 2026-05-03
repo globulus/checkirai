@@ -3,10 +3,11 @@ import { z } from "zod";
 import type { ArtifactRef } from "../artifacts/types.js";
 import type { RequirementResult } from "../core/result.js";
 import type { ToolCallRecord } from "../executors/types.js";
-import type { ProbePlan } from "../planners/types.js";
 import { ensureModelAvailable } from "../llm/modelOps.js";
 import { ollamaGenerate } from "../llm/ollamaHttp.js";
+import { remoteChatCompletion } from "../llm/remoteOpenAIClient.js";
 import type { LlmPolicy } from "../llm/types.js";
+import type { ProbePlan } from "../planners/types.js";
 import { VerifierError } from "../shared/errors.js";
 import type { SpecIR } from "../spec/ir.js";
 import { getExpectedObservables } from "../spec/observables.js";
@@ -80,10 +81,6 @@ export type LlmJudgeSecondPassInput = {
   requirementIds: string[];
 };
 
-function takeLast<T>(xs: T[]): T | undefined {
-  return xs.length ? xs[xs.length - 1] : undefined;
-}
-
 function extractSnapshotTextFromToolOutput(obj: unknown): string | undefined {
   const o = obj as { snapshotText?: unknown } | null;
   return typeof o?.snapshotText === "string" ? o.snapshotText : undefined;
@@ -146,10 +143,11 @@ function sanitizeExpected(exps: unknown): unknown {
     const arr = Array.isArray(exps)
       ? (exps as Array<Record<string, unknown>>)
       : [];
+    const bs = String.fromCharCode(8);
     return arr.map((e) => {
       const pattern = e.pattern;
-      if (typeof pattern === "string" && pattern.includes("\u0008")) {
-        return { ...e, pattern: pattern.replace(/\u0008/g, "\\\\b") };
+      if (typeof pattern === "string" && pattern.includes(bs)) {
+        return { ...e, pattern: pattern.split(bs).join("\\\\b") };
       }
       return e;
     });
@@ -227,7 +225,7 @@ function tryDeterministicSecondPass(opts: {
   return undefined;
 }
 
-async function judgeOneWithOllama(opts: {
+async function judgeOneWithLlm(opts: {
   llm: LlmPolicy;
   model: string;
   requirement: { id: string; source_text: string };
@@ -269,25 +267,52 @@ async function judgeOneWithOllama(opts: {
     truncate(JSON.stringify(opts.toolOutputs, null, 2), 12000),
   ].join("\n");
 
-  const gen = await ollamaGenerate(opts.llm.ollamaHost, {
-    model: opts.model,
-    system,
-    prompt,
-    format: "json",
-    stream: false,
-    options: { temperature: 0 },
-  });
+  let responseText: string;
+  if (opts.llm.provider === "ollama") {
+    const gen = await ollamaGenerate(opts.llm.ollamaHost, {
+      model: opts.model,
+      system,
+      prompt,
+      format: "json",
+      stream: false,
+      options: { temperature: 0 },
+    });
+    responseText = gen.response;
+  } else if (opts.llm.provider === "remote") {
+    if (!opts.llm.remoteBaseUrl?.trim() || !opts.llm.remoteApiKey?.trim()) {
+      throw new VerifierError(
+        "CONFIG_ERROR",
+        "Remote LLM policy missing remoteBaseUrl/remoteApiKey.",
+      );
+    }
+    const out = await remoteChatCompletion({
+      baseUrl: opts.llm.remoteBaseUrl.trim(),
+      apiKey: opts.llm.remoteApiKey.trim(),
+      model: opts.model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0,
+    });
+    responseText = out.content;
+  } else {
+    throw new VerifierError(
+      "CONFIG_ERROR",
+      "Unsupported LLM provider for judge.",
+    );
+  }
 
   let raw: unknown;
   try {
-    raw = JSON.parse(gen.response);
+    raw = JSON.parse(responseText);
   } catch (cause) {
     throw new VerifierError(
       "LLM_PROVIDER_ERROR",
       "LLM judge returned non-JSON.",
       {
         cause,
-        details: { responsePreview: gen.response.slice(0, 500) },
+        details: { responsePreview: responseText.slice(0, 500) },
       },
     );
   }
@@ -302,14 +327,17 @@ export async function judgeLlmSecondPass(
 ): Promise<{ results: RequirementResult[]; meta: { durationMs: number } }> {
   const startedAt = performance.now();
 
-  if (input.llm.provider !== "ollama") {
+  if (input.llm.provider !== "ollama" && input.llm.provider !== "remote") {
     return {
       results: seedResults,
       meta: { durationMs: Math.round(performance.now() - startedAt) },
     };
   }
 
-  const { selectedModel } = await ensureModelAvailable(input.llm);
+  const selectedModel =
+    input.llm.provider === "ollama"
+      ? (await ensureModelAvailable(input.llm)).selectedModel
+      : input.llm.remoteModel?.trim() || "gpt-4o-mini";
   opts?.onSelectedModel?.(selectedModel);
 
   const byReqId = new Map(
@@ -353,7 +381,7 @@ export async function judgeLlmSecondPass(
       continue;
     }
 
-    const llmJudgment = await judgeOneWithOllama({
+    const llmJudgment = await judgeOneWithLlm({
       llm: input.llm,
       model: selectedModel,
       requirement: { id: reqId, source_text: req.source_text },
