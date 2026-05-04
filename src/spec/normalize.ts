@@ -301,6 +301,8 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   markdown: string,
   llm: LlmPolicy,
   opts?: {
+    /** When aborted (e.g. CLI Ctrl+C), stops between normalization attempts. */
+    abortSignal?: AbortSignal;
     onLlmCall?: (e: {
       provider: "ollama" | "remote";
       host?: string;
@@ -356,6 +358,7 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
   let lastFailure: unknown;
 
   for (let attempt = 0; attempt < maxZodAttempts; attempt++) {
+    opts?.abortSignal?.throwIfAborted();
     const t0 = performance.now();
     let responseText: string;
     let modelUsed: string;

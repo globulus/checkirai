@@ -299,7 +299,9 @@ async function judgeOneWithLlm(opts: {
     { system, prompt },
     {
       ollamaUseJsonFormat: effectiveOllamaJsonFormatForJudge(opts.llm.judge),
-      ...(opts.onSelectedModel ? { onSelectedModel: opts.onSelectedModel } : {}),
+      ...(opts.onSelectedModel
+        ? { onSelectedModel: opts.onSelectedModel }
+        : {}),
     },
   );
 

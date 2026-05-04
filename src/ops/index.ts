@@ -2,7 +2,11 @@ export {
   chromeDevtoolsListTools,
   chromeDevtoolsSelfCheck,
 } from "./chromeDevtoolsOps.js";
-export { createOpsContext, type OpsContext } from "./context.js";
+export {
+  closeOpsContext,
+  createOpsContext,
+  type OpsContext,
+} from "./context.js";
 export { RunEventBus } from "./eventBus.js";
 export type { RunEvent, RunEventSink } from "./events.js";
 export {

@@ -22,6 +22,7 @@ export function effectiveOllamaJsonFormatForJudge(
   judge: LlmRoleConfig,
 ): boolean {
   if (judge.provider !== "ollama") return true;
-  if (typeof judge.ollamaJsonFormat === "boolean") return judge.ollamaJsonFormat;
+  if (typeof judge.ollamaJsonFormat === "boolean")
+    return judge.ollamaJsonFormat;
   return !isLikelyThinkingOllamaModel(judge.model);
 }

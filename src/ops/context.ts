@@ -22,3 +22,11 @@ export function createOpsContext(opts?: {
     events: opts?.events ?? new RunEventBus(),
   };
 }
+
+export function closeOpsContext(ctx: OpsContext): void {
+  try {
+    ctx.db.close();
+  } catch {
+    // ignore double-close / busy
+  }
+}

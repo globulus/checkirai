@@ -202,10 +202,7 @@ export function validatePlan(
 
     if (c.tool === "evaluate_script") {
       const fn = (c.args as Record<string, unknown> | undefined)?.function;
-      if (
-        typeof fn === "string" &&
-        hasUnsafeDomNullDerefInEvaluateScript(fn)
-      ) {
+      if (typeof fn === "string" && hasUnsafeDomNullDerefInEvaluateScript(fn)) {
         issues.push({
           kind: "invalid_args",
           tool: c.tool,

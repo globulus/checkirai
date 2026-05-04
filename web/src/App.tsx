@@ -71,8 +71,7 @@ function formatLiveStepLabel(e: RunEvent): string | null {
     return `${cap} › ${act}`;
   }
   if (e.type === "probe_started") {
-    const pid =
-      typeof e.probeId === "string" ? e.probeId.slice(0, 8) : "probe";
+    const pid = typeof e.probeId === "string" ? e.probeId.slice(0, 8) : "probe";
     return `Probe ${pid}…`;
   }
   if (e.type === "run_started") return "Starting verification…";
@@ -1689,9 +1688,14 @@ export function App() {
                 Host RAM (API machine)
               </div>
               <div className="muted">
-                ~<span className="mono">{modelCatalog.hardware.totalMemGiB}</span>{" "}
+                ~
+                <span className="mono">
+                  {modelCatalog.hardware.totalMemGiB}
+                </span>{" "}
                 GiB total system memory · suggested{" "}
-                <code className="mono">profiles.{modelCatalog.hardware.suggestedProfileKey}</code>
+                <code className="mono">
+                  profiles.{modelCatalog.hardware.suggestedProfileKey}
+                </code>
                 {!modelCatalog.hardware.profileExistsInProject ? (
                   <span>
                     {" "}
@@ -1704,13 +1708,13 @@ export function App() {
                 {modelCatalog.hardware.rationale}
               </div>
               <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-                Pull list below is filtered to models with approximate Q4 footprint
-                ≤{" "}
+                Pull list below is filtered to models with approximate Q4
+                footprint ≤{" "}
                 <span className="mono">
                   {modelCatalog.hardware.maxApproxQ4RamGiBForCatalog}
                 </span>{" "}
-                GiB (heuristic for one large model + overhead; see implementation
-                plan).
+                GiB (heuristic for one large model + overhead; see
+                implementation plan).
               </div>
               {modelCatalog.hardware.profileExistsInProject &&
               modelCatalog.hardware.previewLlmPolicy ? (

@@ -19,7 +19,10 @@ export function stripEmbeddedReasoningFromModelText(s: string): string {
     new RegExp(THINK_OPEN + "[\\s\\S]*?" + THINK_CLOSE, "gi"),
     new RegExp(REDACTED_THINK_OPEN + "[\\s\\S]*?" + REDACTED_THINK_CLOSE, "gi"),
     new RegExp(REASONING_OPEN + "[\\s\\S]*?" + REASONING_CLOSE, "gi"),
-    new RegExp(REDACTED_REASON_OPEN + "[\\s\\S]*?" + REDACTED_REASON_CLOSE, "gi"),
+    new RegExp(
+      REDACTED_REASON_OPEN + "[\\s\\S]*?" + REDACTED_REASON_CLOSE,
+      "gi",
+    ),
   ];
   for (let i = 0; i < 6; i++) {
     let next = t;

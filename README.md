@@ -10,13 +10,15 @@ _|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""| {======|_|"""""|_|"""""
 
 **Checkir AI** is a spec-driven verification runtime: it reads a human-readable spec, plans probes, runs tools (including MCP-backed capabilities) and returns **requirement-level verdicts** — pass, fail, inconclusive, or blocked — with evidence you can inspect offline. LLM-assisted phases default to **Ollama** on your machine; you can also use a **`remote`** provider (OpenAI-compatible HTTP API) for normalization and judging. Tool hosts connect over **MCP** the same way Cursor or Claude Code talks to other servers.
 
+![GIF demo](./fixtures/demo.gif)
+
 ---
 
 ## Why?
 
 - **Tokens and API calls add up.** Re-running the same “does the UI match the spec?” loop through a cloud model is slow and expensive.
+- **Repeatable runs** write structured reports, SQLite state and artifacts under a known output root — ideal for CI, dashboards and agent loops.. You can also **repeat a run from any phase**, further saving time and costs.
 - **Local-first verification** keeps sensitive URLs, traces, and artifacts on your machine while still using an LLM where judgment helps (planning, interpretation). Optional **remote** LLMs use your API key and base URL (see `docs/USAGE.md` and `checkirai.config.json`) - but the main idea is still to be able to run this locally.
-- **Repeatable runs** write structured reports, SQLite state and artifacts under a known output root—ideal for CI, dashboards and agent loops.
 - **CLI and MCP as the integration surface** lets Cursor, Claude Code and other hosts treat verification as a first-class tool alongside Chrome DevTools, filesystem, etc.
 
 Note that doing the same task (spec-based software verification using tools) with a remote agent is almost certainly going to be faster, but **each and every run incurrs a cost local checks don't**. Plus, unlike with a remote agent, you only need to do the spec -> IR -> executive plan pipeline once: the local artifacts allow you to re-run the judgement/verification phase solely, further conserving resources.

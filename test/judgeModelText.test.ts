@@ -9,15 +9,7 @@ describe("stripEmbeddedReasoningFromModelText", () => {
   it("removes think wrapper before JSON", () => {
     const inner = '{"verdict":"pass","confidence":0.9,"why":"ok"}';
     const wrapped =
-      "<" +
-      "think" +
-      ">" +
-      "step 1..." +
-      "<" +
-      "/" +
-      "think" +
-      ">" +
-      inner;
+      "<" + "think" + ">" + "step 1..." + "<" + "/" + "think" + ">" + inner;
     expect(stripEmbeddedReasoningFromModelText(wrapped)).toBe(inner);
   });
 });
@@ -25,16 +17,7 @@ describe("stripEmbeddedReasoningFromModelText", () => {
 describe("parseLooseJudgeJsonResponse", () => {
   it("parses JSON after stripped thinking", () => {
     const json = '{"verdict":"fail","confidence":0.8,"why":"missing"}';
-    const text =
-      "<" +
-      "think" +
-      ">" +
-      "hmm" +
-      "<" +
-      "/" +
-      "think" +
-      ">" +
-      json;
+    const text = "<" + "think" + ">" + "hmm" + "<" + "/" + "think" + ">" + json;
     const out = parseLooseJudgeJsonResponse(text) as Record<string, unknown>;
     expect(out.verdict).toBe("fail");
     expect(out.why).toBe("missing");
@@ -59,8 +42,8 @@ describe("coalesceJudgmentWhyFromRecord", () => {
   });
 
   it("uses reasoning when why missing", () => {
-    expect(
-      coalesceJudgmentWhyFromRecord({ reasoning: "Only this." }),
-    ).toBe("Only this.");
+    expect(coalesceJudgmentWhyFromRecord({ reasoning: "Only this." })).toBe(
+      "Only this.",
+    );
   });
 });

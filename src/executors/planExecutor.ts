@@ -77,11 +77,13 @@ export async function executeToolCallPlan(opts: {
   artifactStore: ArtifactStore;
   policyName: "read_only" | "ui_only";
   onEvent?: RunEventSink;
+  abortSignal?: AbortSignal;
 }): Promise<PlanExecutionOutput> {
   const toolCalls: ToolCallRecord[] = [];
   const artifacts: ArtifactRef[] = [];
 
   for (const step of opts.toolCalls) {
+    opts.abortSignal?.throwIfAborted();
     const id = randomUUID();
     const startedAt = nowIso();
 

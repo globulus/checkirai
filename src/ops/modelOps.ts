@@ -54,9 +54,7 @@ export function buildLlmHardwareHint(opts?: {
   const totalGiB = bytesToGiB(bytes);
   const suggestedProfileKey = suggestProfileKeyFromTotalRamGiB(totalGiB);
   const { config: project } = loadProjectConfig(
-    opts?.projectRootDir !== undefined
-      ? { rootDir: opts.projectRootDir }
-      : {},
+    opts?.projectRootDir !== undefined ? { rootDir: opts.projectRootDir } : {},
   );
   const profileExists = Boolean(project?.profiles?.[suggestedProfileKey]);
   const base = LlmPolicySchema.parse(project?.llm ?? {});

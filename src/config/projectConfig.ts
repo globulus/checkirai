@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import {
+  type LlmPolicy,
   LlmPolicySchema,
   LlmRoleConfigSchema,
-  type LlmPolicy,
 } from "../llm/types.js";
 
 const LlmRolePatchSchema = LlmRoleConfigSchema.partial();
@@ -100,16 +100,21 @@ export function loadProjectConfig(opts?: { rootDir?: string }): {
   config: ProjectConfig | null;
   path: string | null;
 } {
-  const root = opts?.rootDir ?? process.cwd();
-  for (const rel of DEFAULT_PROJECT_CONFIG_FILENAMES) {
-    const p = join(root, rel);
-    try {
-      const text = readFileSync(p, "utf8");
-      const raw = JSON.parse(text) as unknown;
-      return { config: ProjectConfigSchema.parse(raw), path: p };
-    } catch {
-      // ignore: file missing or invalid JSON/schema
+  let dir = opts?.rootDir ?? process.cwd();
+  for (let depth = 0; depth < 10; depth++) {
+    for (const rel of DEFAULT_PROJECT_CONFIG_FILENAMES) {
+      const p = join(dir, rel);
+      try {
+        const text = readFileSync(p, "utf8");
+        const raw = JSON.parse(text) as unknown;
+        return { config: ProjectConfigSchema.parse(raw), path: p };
+      } catch {
+        // ignore: file missing or invalid JSON/schema
+      }
     }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return { config: null, path: null };
 }

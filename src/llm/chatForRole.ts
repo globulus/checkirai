@@ -82,7 +82,9 @@ export async function chatJsonForRole(
       model: selectedModel,
       system: input.system,
       prompt: input.prompt,
-      ...(hooks?.ollamaUseJsonFormat === false ? {} : { format: "json" as const }),
+      ...(hooks?.ollamaUseJsonFormat === false
+        ? {}
+        : { format: "json" as const }),
       stream: false,
       options: { temperature: temp },
     });
