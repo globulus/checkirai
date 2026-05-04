@@ -7,8 +7,9 @@ import type {
   RequirementIR,
   SpecIR,
 } from "../spec/ir.js";
+import { SPEC_ECHO_MARKERS } from "../spec/llmPromptConstants.js";
 import { getExpectedObservables } from "../spec/observables.js";
-import { readArtifactJson } from "./artifactReader.js";
+import { readArtifactJson, readArtifactText } from "./artifactReader.js";
 
 export type JudgeInput = {
   spec: SpecIR;
@@ -16,6 +17,13 @@ export type JudgeInput = {
   toolCalls: ToolCallRecord[];
   artifacts: ArtifactRef[];
   artifactRootDir: string;
+  /**
+   * When set, `isLikelySpecEcho` is enabled only if the target base URL matches
+   * (verifier dashboard self-test).
+   */
+  selfTestTargetBaseUrl?: string;
+  /** Current run target; compared to `selfTestTargetBaseUrl` to gate spec-echo heuristics. */
+  targetBaseUrl?: string;
 };
 
 function indexOfAny(haystackLower: string, needles: string[]): number {
@@ -26,18 +34,18 @@ function indexOfAny(haystackLower: string, needles: string[]): number {
   return -1;
 }
 
-function isLikelySpecEcho(snapshotText: string, expectedText: string): boolean {
+function isLikelySpecEcho(
+  snapshotText: string,
+  expectedText: string,
+  enabled: boolean,
+): boolean {
+  if (!enabled) return false;
   const snap = snapshotText.toLowerCase();
   const exp = expectedText.toLowerCase();
   const expIdx = snap.indexOf(exp);
   if (expIdx < 0) return false;
 
-  const specMarkers = [
-    "input spec ir",
-    "markdown spec:",
-    '"prompt":',
-    "convert the markdown spec below into json",
-  ];
+  const specMarkers = [...SPEC_ECHO_MARKERS];
   const hits = specMarkers.filter((m) => snap.includes(m));
   if (hits.length < 2) return false;
   const markerIdx = indexOfAny(snap, specMarkers);
@@ -116,7 +124,7 @@ function extractButtonStyleEvidence(
   toolOutputArtifacts: ArtifactRef[],
   artifactRootDir: string,
 ): ButtonStyleSample[] | undefined {
-  for (const a of toolOutputArtifacts.slice().reverse()) {
+  for (const a of [...toolOutputArtifacts].reverse()) {
     try {
       const obj = readArtifactJson<unknown>(artifactRootDir, a);
       const rt = (obj as { responseText?: unknown } | null)?.responseText;
@@ -174,7 +182,7 @@ function latestPageUrlFromCalls(
     .filter(Boolean)
     .map((id) => artifactsById.get(id as string))
     .filter(Boolean) as ArtifactRef[];
-  for (const a of arts.slice().reverse()) {
+  for (const a of [...arts].reverse()) {
     try {
       const obj = readArtifactJson<unknown>(root, a);
       const u = (obj as { pageUrl?: unknown } | null)?.pageUrl;
@@ -250,17 +258,40 @@ function judgeRequirement(
     .map((id) => artifactsById.get(id as string))
     .filter(Boolean) as ArtifactRef[];
 
+  const specEchoEnabled = Boolean(
+    input.selfTestTargetBaseUrl?.trim() &&
+      input.targetBaseUrl?.trim() &&
+      input.selfTestTargetBaseUrl.trim() === input.targetBaseUrl.trim(),
+  );
+
   let snapshotText: string | undefined;
-  for (const a of toolOutputArtifacts.slice().reverse()) {
+  const a11yOrdered = input.artifacts
+    .filter((a) => a.type === "a11y_snapshot")
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  for (const a of a11yOrdered) {
     try {
-      const obj = readArtifactJson<unknown>(input.artifactRootDir, a);
-      const st = (obj as { snapshotText?: unknown } | null)?.snapshotText;
-      if (typeof st === "string" && st.length > 0) {
-        snapshotText = st;
+      const txt = readArtifactText(input.artifactRootDir, a).trim();
+      if (txt) {
+        snapshotText = txt;
         break;
       }
     } catch {
       // ignore
+    }
+  }
+  if (!snapshotText) {
+    for (const a of [...toolOutputArtifacts].reverse()) {
+      try {
+        const obj = readArtifactJson<unknown>(input.artifactRootDir, a);
+        const st = (obj as { snapshotText?: unknown } | null)?.snapshotText;
+        if (typeof st === "string" && st.length > 0) {
+          snapshotText = st;
+          break;
+        }
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -321,7 +352,7 @@ function judgeRequirement(
     if (e.kind === "text_present" && e.text) {
       if (
         !snap.toLowerCase().includes(e.text.toLowerCase()) ||
-        isLikelySpecEcho(snap, e.text)
+        isLikelySpecEcho(snap, e.text, specEchoEnabled)
       )
         failures.push(`Missing text: "${e.text}"`);
     } else if (e.kind === "role_present" && e.role) {
@@ -359,6 +390,10 @@ function judgeRequirement(
         const expectedColorRaw = expectedBgRaw ?? expectedFgRaw;
         if (!expectedColorRaw) {
           unchecked.push("element_visible(css)");
+          continue;
+        }
+        if (expectedColorRaw.includes("var(")) {
+          unchecked.push("element_visible(css:var)");
           continue;
         }
         if (!buttonStyleEvidence?.length) {

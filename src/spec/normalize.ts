@@ -1,9 +1,6 @@
 import { performance } from "node:perf_hooks";
-import { ensureModelAvailable } from "../llm/modelOps.js";
-import { ollamaGenerate } from "../llm/ollamaHttp.js";
-import { remoteChatCompletion } from "../llm/remoteOpenAIClient.js";
+import { chatJsonForRole } from "../llm/chatForRole.js";
 import type { LlmPolicy } from "../llm/types.js";
-import { VerifierError } from "../shared/errors.js";
 import {
   type ObservableExpectationIR,
   type SpecIR,
@@ -39,6 +36,7 @@ export type SpecNormalizationMeta =
       durationMs: number;
       specChars: number;
       usedFallbackHeuristics: boolean;
+      retriedWithFallbackModel?: boolean;
     };
 
 function extractQuotedStrings(s: string): string[] {
@@ -344,42 +342,45 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
     };
   };
 
-  if (llm.provider === "none") {
+  if (llm.normalizer.provider === "none") {
     return heuristic("none");
   }
 
-  if (llm.provider === "remote") {
-    if (markdown.length > 40_000) {
-      return heuristic("other");
-    }
-    if (!llm.remoteBaseUrl?.trim() || !llm.remoteApiKey?.trim()) {
-      return heuristic("other");
-    }
-    const system = normalizationSystem();
-    const prompt = buildNormalizationPrompt(markdown.trim());
-    const model = llm.remoteModel?.trim() || "gpt-4o-mini";
+  if (markdown.length > 40_000) {
+    return heuristic(llm.normalizer.provider === "remote" ? "other" : "ollama");
+  }
+
+  const system = normalizationSystem();
+  const prompt = buildNormalizationPrompt(markdown.trim());
+  const maxZodAttempts = Math.max(1, (llm.normalizer.maxRetries ?? 3) + 1);
+  let lastFailure: unknown;
+
+  for (let attempt = 0; attempt < maxZodAttempts; attempt++) {
+    const t0 = performance.now();
     let responseText: string;
-    const tRemote = performance.now();
+    let modelUsed: string;
     try {
-      const out = await remoteChatCompletion({
-        baseUrl: llm.remoteBaseUrl.trim(),
-        apiKey: llm.remoteApiKey.trim(),
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0,
+      const out = await chatJsonForRole(llm, "normalizer", {
+        system,
+        prompt,
       });
-      responseText = out.content;
-    } catch {
-      return heuristic("other");
+      responseText = out.responseText;
+      modelUsed = out.modelUsed;
+    } catch (e) {
+      if (llm.normalizer.provider === "remote") return heuristic("other");
+      lastFailure = e;
+      continue;
     }
-    const durRemote = Math.max(0, Math.round(performance.now() - tRemote));
+
+    const durMs = Math.max(0, Math.round(performance.now() - t0));
     opts?.onLlmCall?.({
-      provider: "remote",
-      host: llm.remoteBaseUrl,
-      model,
+      provider: llm.normalizer.provider === "remote" ? "remote" : "ollama",
+      ...(llm.normalizer.provider === "remote"
+        ? llm.normalizer.remoteBaseUrl?.trim()
+          ? { host: llm.normalizer.remoteBaseUrl.trim() }
+          : {}
+        : { host: llm.ollamaHost }),
+      model: modelUsed,
       system,
       prompt:
         prompt.length > maxPromptChars
@@ -389,7 +390,7 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
         responseText.length > maxResponseChars
           ? `${responseText.slice(0, maxResponseChars)}\n…(truncated)`
           : responseText,
-      durationMs: durRemote,
+      durationMs: durMs,
       promptChars: prompt.length,
       responseChars: responseText.length,
       truncated: {
@@ -398,154 +399,53 @@ export async function normalizeMarkdownToSpecIRWithLlmDetailed(
       },
       phase: "spec_normalization",
     });
+
     let raw: unknown;
     try {
       raw = JSON.parse(responseText);
     } catch {
-      return heuristic("other");
+      lastFailure = new Error("normalize: non-JSON model output");
+      continue;
     }
-    const specIr = finalizeParsedSpecIr(raw);
-    const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
-    return {
-      specIr,
-      meta: {
-        mode: "remote",
-        provider: "remote",
-        selectedModel: model,
-        durationMs,
-        specChars,
-        usedFallbackHeuristics: false,
-      },
-    };
-  }
 
-  if (llm.provider !== "ollama") {
-    return heuristic("other");
-  }
-
-  // Avoid sending extremely large prompts to Ollama (common cause of upstream 500s).
-  // If the spec is huge, fall back to deterministic heuristics.
-  if (markdown.length > 40_000) {
-    return heuristic("ollama");
-  }
-
-  const { selectedModel } = await ensureModelAvailable(llm);
-
-  const system = normalizationSystem();
-  const prompt = buildNormalizationPrompt(markdown.trim());
-
-  const generateOnce = async (model: string) =>
-    await ollamaGenerate(llm.ollamaHost, {
-      model,
-      system,
-      prompt,
-      format: "json",
-      stream: false,
-      options: { temperature: 0 },
-    });
-
-  let gen: Awaited<ReturnType<typeof ollamaGenerate>> | undefined;
-  let retriedWithFallbackModel = false;
-  try {
-    const t0 = performance.now();
-    gen = await generateOnce(selectedModel);
-    const durMs = Math.max(0, Math.round(performance.now() - t0));
-    opts?.onLlmCall?.({
-      provider: "ollama",
-      host: llm.ollamaHost,
-      model: selectedModel,
-      system,
-      prompt:
-        prompt.length > maxPromptChars
-          ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)`
-          : prompt,
-      responseText:
-        gen.response.length > maxResponseChars
-          ? `${gen.response.slice(0, maxResponseChars)}\n…(truncated)`
-          : gen.response,
-      durationMs: durMs,
-      promptChars: prompt.length,
-      responseChars: gen.response.length,
-      truncated: {
-        prompt: prompt.length > maxPromptChars,
-        response: gen.response.length > maxResponseChars,
-      },
-      phase: "spec_normalization",
-    });
-  } catch (err) {
-    // Common failure mode: an installed-but-heavy model errors at runtime (OOM / load failure),
-    // producing Ollama HTTP 500. If allowed, retry once with the light default recommendation.
-    const fallbackModel = "qwen2.5:7b-instruct";
-    if (
-      llm.allowAutoPull &&
-      err instanceof VerifierError &&
-      err.code === "LLM_PROVIDER_ERROR" &&
-      (err.details?.status === 500 || err.details?.status === "500") &&
-      selectedModel !== fallbackModel
-    ) {
-      retriedWithFallbackModel = true;
-      // Ensure fallback model exists (may auto-pull).
-      const ensured = await ensureModelAvailable({
-        ...llm,
-        ollamaModel: fallbackModel,
-      });
-      const t0 = performance.now();
-      gen = await generateOnce(ensured.selectedModel);
-      const durMs = Math.max(0, Math.round(performance.now() - t0));
-      opts?.onLlmCall?.({
-        provider: "ollama",
-        host: llm.ollamaHost,
-        model: ensured.selectedModel,
-        system,
-        prompt:
-          prompt.length > maxPromptChars
-            ? `${prompt.slice(0, maxPromptChars)}\n…(truncated)`
-            : prompt,
-        responseText:
-          gen.response.length > maxResponseChars
-            ? `${gen.response.slice(0, maxResponseChars)}\n…(truncated)`
-            : gen.response,
-        durationMs: durMs,
-        promptChars: prompt.length,
-        responseChars: gen.response.length,
-        truncated: {
-          prompt: prompt.length > maxPromptChars,
-          response: gen.response.length > maxResponseChars,
-        },
-        phase: "spec_normalization",
-      });
-    } else {
-      throw err;
+    try {
+      const specIr = finalizeParsedSpecIr(raw);
+      const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+      const mode =
+        llm.normalizer.provider === "remote"
+          ? ("remote" as const)
+          : ("ollama" as const);
+      return {
+        specIr,
+        meta:
+          mode === "remote"
+            ? {
+                mode: "remote",
+                provider: "remote",
+                selectedModel: modelUsed,
+                durationMs,
+                specChars,
+                usedFallbackHeuristics: false,
+                ...(attempt > 0 ? { retriedWithFallbackModel: true } : {}),
+              }
+            : {
+                mode: "ollama",
+                provider: "ollama",
+                selectedModel: modelUsed,
+                durationMs,
+                specChars,
+                usedFallbackHeuristics: false,
+                retriedWithFallbackModel: attempt > 0,
+              },
+      };
+    } catch (e) {
+      lastFailure = e;
     }
   }
 
-  if (!gen) {
-    return heuristic("ollama");
-  }
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(gen.response);
-  } catch {
-    // If Ollama didn't honor format=json, fall back.
-    return heuristic("ollama");
-  }
-
-  const specIr = finalizeParsedSpecIr(raw);
-
-  const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
-  return {
-    specIr,
-    meta: {
-      mode: "ollama",
-      provider: "ollama",
-      selectedModel,
-      durationMs,
-      specChars,
-      usedFallbackHeuristics: false,
-      retriedWithFallbackModel,
-    },
-  };
+  if (llm.normalizer.provider === "remote") return heuristic("other");
+  if (lastFailure) throw lastFailure;
+  return heuristic("ollama");
 }
 
 export async function normalizeMarkdownToSpecIRWithLlm(

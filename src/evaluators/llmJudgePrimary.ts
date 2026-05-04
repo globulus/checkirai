@@ -3,24 +3,29 @@ import { z } from "zod";
 import type { ArtifactRef } from "../artifacts/types.js";
 import type { RequirementResult } from "../core/result.js";
 import type { ToolCallRecord } from "../executors/types.js";
-import { ensureModelAvailable } from "../llm/modelOps.js";
-import { ollamaGenerate } from "../llm/ollamaHttp.js";
-import { remoteChatCompletion } from "../llm/remoteOpenAIClient.js";
+import { chatJsonForRole } from "../llm/chatForRole.js";
+import {
+  coalesceJudgmentWhyFromRecord,
+  parseLooseJudgeJsonResponse,
+} from "../llm/judgeModelText.js";
+import { effectiveOllamaJsonFormatForJudge } from "../llm/ollamaJudgeJsonFormat.js";
 import type { LlmPolicy } from "../llm/types.js";
 import type { TestPlanIR } from "../planners/planIr.js";
 import { VerifierError } from "../shared/errors.js";
 import type { SpecIR } from "../spec/ir.js";
 import { getExpectedObservables } from "../spec/observables.js";
-import { readArtifactJson } from "./artifactReader.js";
+import { readArtifactJson, readArtifactText } from "./artifactReader.js";
 
 const VerdictSchema = z.enum(["pass", "fail", "inconclusive", "blocked"]);
 
-const JudgmentLooseSchema = z.object({
-  verdict: z.unknown(),
-  confidence: z.unknown().optional(),
-  why: z.unknown().optional(),
-  repair_hint: z.unknown().optional(),
-});
+const JudgmentLooseSchema = z
+  .object({
+    verdict: z.unknown(),
+    confidence: z.unknown().optional(),
+    why: z.unknown().optional(),
+    repair_hint: z.unknown().optional(),
+  })
+  .passthrough();
 
 function normalizeVerdict(v: unknown): z.infer<typeof VerdictSchema> {
   const s = typeof v === "string" ? v.toLowerCase().trim() : "";
@@ -42,18 +47,23 @@ function normStr(v: unknown): string | undefined {
 type SingleJudgment = {
   verdict: z.infer<typeof VerdictSchema>;
   confidence: number;
-  why?: string;
+  why: string;
   repair_hint?: string;
 };
 
 function normalizeJudgment(raw: unknown): SingleJudgment {
   const loose = JudgmentLooseSchema.parse(raw);
-  const why = normStr(loose.why);
+  const rec = loose as Record<string, unknown>;
+  let why = coalesceJudgmentWhyFromRecord(rec);
+  if (!why) {
+    const v = normalizeVerdict(rec.verdict);
+    why = `Verdict=${v} (model omitted why/reasoning; enable thinking or use a model that fills JSON fields).`;
+  }
   const repair_hint = normStr(loose.repair_hint);
   return {
     verdict: normalizeVerdict(loose.verdict),
     confidence: normalizeConfidence(loose.confidence),
-    ...(why ? { why } : {}),
+    why,
     ...(repair_hint ? { repair_hint } : {}),
   };
 }
@@ -96,12 +106,28 @@ function collectGlobalEvidence(opts: {
   const toolOutputs: unknown[] = [];
   let snapshotText: string | undefined;
 
+  const a11yOrdered = opts.artifacts
+    .filter((a) => a.type === "a11y_snapshot")
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  for (const a of a11yOrdered) {
+    try {
+      const txt = readArtifactText(opts.artifactRootDir, a).trim();
+      if (txt) {
+        snapshotText = txt;
+        break;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   for (const a of toolOutputArtifacts) {
     try {
       const obj = readArtifactJson<unknown>(opts.artifactRootDir, a);
       toolOutputs.push(obj);
       const st = (obj as { snapshotText?: unknown } | null)?.snapshotText;
-      if (typeof st === "string") snapshotText = st;
+      if (typeof st === "string" && !snapshotText) snapshotText = st;
     } catch {
       // ignore
     }
@@ -129,55 +155,27 @@ function majorityAggregate(judgments: SingleJudgment[]): SingleJudgment {
 
   // If no majority (e.g. 1/1/1), return inconclusive.
   if (topCount === 1 && counts.size > 1) {
-    return { verdict: "inconclusive", confidence: 0.3 };
+    const detail = judgments
+      .map((j, i) => {
+        const w = j.why ? ` — ${j.why}` : "";
+        return `attempt ${i + 1}: ${j.verdict}${w}`;
+      })
+      .join("; ");
+    return {
+      verdict: "inconclusive",
+      confidence: 0.3,
+      why: `Self-consistency: no majority among attempts (${detail}).`,
+    };
   }
+  const synthesizedWhy =
+    why ??
+    `Aggregated ${topVerdict} (${topCount}/${judgments.length} samples); no per-attempt rationale text was returned.`;
   return {
     verdict: topVerdict as z.infer<typeof VerdictSchema>,
     confidence: Math.max(0, Math.min(1, confidence)),
-    ...(why ? { why } : {}),
+    why: synthesizedWhy,
     ...(repair_hint ? { repair_hint } : {}),
   };
-}
-
-/** Parse model output as JSON; never throw — bad/empty output becomes inconclusive judgment shape. */
-function safeParseJudgmentJsonResponse(
-  text: string | undefined | null,
-): unknown {
-  const raw = typeof text === "string" ? text.trim() : "";
-  if (!raw) {
-    return {
-      verdict: "inconclusive",
-      confidence: 0.3,
-      why: "Empty model response (no JSON).",
-    };
-  }
-  try {
-    return JSON.parse(raw) as unknown;
-  } catch {
-    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const inner = fence?.[1]?.trim();
-    if (inner) {
-      try {
-        return JSON.parse(inner) as unknown;
-      } catch {
-        // fall through
-      }
-    }
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(raw.slice(start, end + 1)) as unknown;
-      } catch {
-        // fall through
-      }
-    }
-    return {
-      verdict: "inconclusive",
-      confidence: 0.3,
-      why: "Model returned non-JSON or unparseable output.",
-    };
-  }
 }
 
 async function llmCallJson(opts: {
@@ -187,43 +185,25 @@ async function llmCallJson(opts: {
   temperature: number;
   onSelectedModel?: (model: string) => void;
 }): Promise<unknown> {
-  if (opts.llm.provider === "ollama") {
-    const { selectedModel } = await ensureModelAvailable(opts.llm);
-    opts.onSelectedModel?.(selectedModel);
-    const gen = await ollamaGenerate(opts.llm.ollamaHost, {
-      model: selectedModel,
-      system: opts.system,
-      prompt: opts.prompt,
-      format: "json",
-      stream: false,
-      options: { temperature: opts.temperature },
-    });
-    return safeParseJudgmentJsonResponse(gen.response);
+  if (opts.llm.judge.provider === "none") {
+    throw new VerifierError(
+      "CONFIG_ERROR",
+      "LLM judge role is disabled (provider none); cannot judge.",
+    );
   }
-  if (opts.llm.provider === "remote") {
-    if (!opts.llm.remoteBaseUrl || !opts.llm.remoteApiKey) {
-      throw new VerifierError(
-        "CONFIG_ERROR",
-        "Remote LLM policy missing remoteBaseUrl/remoteApiKey.",
-      );
-    }
-    const model = opts.llm.remoteModel?.trim() || "gpt-4o-mini";
-    const out = await remoteChatCompletion({
-      baseUrl: opts.llm.remoteBaseUrl,
-      apiKey: opts.llm.remoteApiKey,
-      model,
-      messages: [
-        { role: "system", content: opts.system },
-        { role: "user", content: opts.prompt },
-      ],
-      temperature: opts.temperature,
-    });
-    return safeParseJudgmentJsonResponse(out.content);
-  }
-  throw new VerifierError(
-    "CONFIG_ERROR",
-    "LLM provider is none; cannot judge.",
+  const { responseText } = await chatJsonForRole(
+    opts.llm,
+    "judge",
+    { system: opts.system, prompt: opts.prompt },
+    {
+      temperatureOverride: opts.temperature,
+      ollamaUseJsonFormat: effectiveOllamaJsonFormatForJudge(opts.llm.judge),
+      ...(opts.onSelectedModel
+        ? { onSelectedModel: opts.onSelectedModel }
+        : {}),
+    },
   );
+  return parseLooseJudgeJsonResponse(responseText);
 }
 
 async function judgeRequirementAttempt(opts: {
@@ -236,12 +216,15 @@ async function judgeRequirementAttempt(opts: {
   onSelectedModel?: (model: string) => void;
 }): Promise<SingleJudgment> {
   const system =
-    "You are a strict verifier. Decide pass/fail/inconclusive based ONLY on provided evidence. Output JSON only.";
+    "You are a strict verifier. Decide pass/fail/inconclusive based ONLY on provided evidence. " +
+    "You may think step-by-step internally, but the assistant message must end with a single JSON object (no markdown outside it).";
   const prompt = [
-    "Return JSON matching:",
-    "{ verdict: 'pass'|'fail'|'inconclusive', confidence: number, why?: string, repair_hint?: string }",
+    "Return ONE JSON object matching:",
+    "{ verdict: 'pass'|'fail'|'inconclusive', confidence: number, why: string, reasoning?: string, repair_hint?: string }",
     "",
     "Rules:",
+    "- `why` is REQUIRED: 1–3 sentences citing concrete evidence (snapshot text, tool output fields, or explicit lack thereof).",
+    "- `reasoning` is OPTIONAL: longer step-by-step rationale (thinking models should put detailed chain-of-thought here).",
     "- Use verdict=pass only if evidence clearly satisfies the expectation.",
     "- Use verdict=fail only if evidence clearly contradicts the expectation.",
     "- Otherwise verdict=inconclusive.",
@@ -428,10 +411,10 @@ export async function judgeWithSelfConsistency(opts: {
   const startedAt = performance.now();
   const attempts = typeof opts.attempts === "number" ? opts.attempts : 3;
 
-  if (opts.llm.provider === "none") {
+  if (opts.llm.judge.provider === "none") {
     throw new VerifierError(
       "CONFIG_ERROR",
-      "LLM provider is none; cannot judge.",
+      "LLM judge role is disabled (provider none); cannot judge.",
     );
   }
 
@@ -467,7 +450,7 @@ export async function judgeWithSelfConsistency(opts: {
           source_text: r.source_text,
           expected_observables: expected,
         },
-        ...(det.why ? { why_failed_or_blocked: det.why } : {}),
+        why_failed_or_blocked: det.why,
       });
       continue;
     }
@@ -497,7 +480,7 @@ export async function judgeWithSelfConsistency(opts: {
       judgment_mode: "model_assisted",
       evidence_refs: [],
       expected: { source_text: r.source_text, expected_observables: expected },
-      ...(agg.why ? { why_failed_or_blocked: agg.why } : {}),
+      why_failed_or_blocked: agg.why,
       ...(agg.repair_hint ? { repair_hint: agg.repair_hint } : {}),
     });
   }

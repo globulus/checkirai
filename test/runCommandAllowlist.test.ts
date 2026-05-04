@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { isRunCommandAllowlisted } from "../src/shared/runCommandAllowlist.js";
+import {
+  hasShellMetacharacters,
+  isRunCommandAllowlisted,
+} from "../src/shared/runCommandAllowlist.js";
 
 describe("isRunCommandAllowlisted", () => {
   it("denies when allowlist is empty or missing", () => {
@@ -19,5 +22,15 @@ describe("isRunCommandAllowlisted", () => {
       true,
     );
     expect(isRunCommandAllowlisted(["npm*"], "pnpm", ["test"])).toBe(false);
+  });
+});
+
+describe("hasShellMetacharacters", () => {
+  it("flags common shell metacharacters", () => {
+    expect(hasShellMetacharacters("echo hello")).toBe(false);
+    expect(hasShellMetacharacters("foo;rm -rf /")).toBe(true);
+    expect(hasShellMetacharacters("a|b")).toBe(true);
+    expect(hasShellMetacharacters("x`y`")).toBe(true);
+    expect(hasShellMetacharacters("$(whoami)")).toBe(true);
   });
 });

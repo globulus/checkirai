@@ -2,6 +2,8 @@ export type ErrorCode =
   | "CONFIG_ERROR"
   | "POLICY_BLOCKED"
   | "TOOL_UNAVAILABLE"
+  /** In-page script threw or returned non-serializable data (e.g. chrome-devtools evaluate_script). */
+  | "EVAL_SCRIPT_FAILED"
   | "TIMEOUT"
   | "OLLAMA_NOT_RUNNING"
   | "OLLAMA_MODEL_MISSING"

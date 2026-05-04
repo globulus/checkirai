@@ -1,3 +1,10 @@
+const SHELL_METACHAR_RE = /[;&|`$(){}\[\]<>\r\n]/;
+
+/** True if the fragment likely invokes shell parsing (metacharacters / newlines). */
+export function hasShellMetacharacters(fragment: string): boolean {
+  return SHELL_METACHAR_RE.test(fragment);
+}
+
 /**
  * Allowlist entries: exact match on the full command line (command + args, space-separated),
  * or prefix match when the entry ends with `*`.

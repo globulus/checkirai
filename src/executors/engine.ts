@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { ArtifactStore } from "../artifacts/store.js";
 import type { ArtifactRef } from "../artifacts/types.js";
-import type { CapabilitySet } from "../capabilities/types.js";
+import { Capability, type CapabilitySet } from "../capabilities/types.js";
 import type { RunEventSink } from "../ops/events.js";
 import type { Probe, ProbePlan, ProbeStep } from "../planners/types.js";
 import { assertPolicyAllows, getPolicy } from "../policies/policy.js";
 import { VerifierError } from "../shared/errors.js";
-import { isRunCommandAllowlisted } from "../shared/runCommandAllowlist.js";
+import {
+  hasShellMetacharacters,
+  isRunCommandAllowlisted,
+} from "../shared/runCommandAllowlist.js";
 import type { ExecutorIntegrations } from "./integrations.js";
 import type { ToolCallRecord } from "./types.js";
 
@@ -25,6 +28,8 @@ type RunStepContext = {
   abortSignal?: AbortSignal;
   /** When empty or undefined, all `run_command` steps are denied. */
   runCommandAllowlist?: string[];
+  /** When true, allows shell metacharacters in `run_command` command/args (default false). */
+  allowShellMetacharacters?: boolean;
 };
 
 export type ExecutionOutput = {
@@ -138,7 +143,7 @@ async function runStep(
 
     let output: unknown;
     switch (step.capability) {
-      case "read_files": {
+      case Capability.read_files: {
         if (!integrations.fs)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -148,7 +153,7 @@ async function runStep(
         output = { path, text: integrations.fs.readText(path) };
         break;
       }
-      case "call_http": {
+      case Capability.call_http: {
         if (!integrations.http)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -159,7 +164,7 @@ async function runStep(
         output = { ...resHttp, url };
         break;
       }
-      case "navigate": {
+      case Capability.navigate: {
         if (!integrations.chrome)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -170,7 +175,7 @@ async function runStep(
         output = { ok: true, url };
         break;
       }
-      case "read_ui_structure": {
+      case Capability.read_ui_structure: {
         if (!integrations.chrome)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -195,7 +200,7 @@ async function runStep(
         }
         break;
       }
-      case "read_visual": {
+      case Capability.read_visual: {
         if (!integrations.chrome)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -220,7 +225,7 @@ async function runStep(
         }
         break;
       }
-      case "interact": {
+      case Capability.interact: {
         if (!integrations.chrome)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -292,7 +297,7 @@ async function runStep(
           `Unsupported interact kind: ${kind}`,
         );
       }
-      case "read_console": {
+      case Capability.read_console: {
         if (!integrations.chrome)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -305,7 +310,7 @@ async function runStep(
         output = { response: res };
         break;
       }
-      case "read_network": {
+      case Capability.read_network: {
         if (!integrations.chrome)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -318,7 +323,7 @@ async function runStep(
         output = { response: res };
         break;
       }
-      case "run_command": {
+      case Capability.run_command: {
         if (!integrations.shell)
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -334,6 +339,17 @@ async function runStep(
           throw new VerifierError(
             "POLICY_BLOCKED",
             "run_command is not allowlisted. Set runCommandAllowlist (prefix with * for prefix match).",
+            { details: { command, args } },
+          );
+        }
+        if (
+          ctx.allowShellMetacharacters !== true &&
+          (hasShellMetacharacters(command) ||
+            args.some((a) => hasShellMetacharacters(String(a))))
+        ) {
+          throw new VerifierError(
+            "POLICY_BLOCKED",
+            "run_command rejected: shell metacharacters in command or args. Set allowShellMetacharacters to opt in.",
             { details: { command, args } },
           );
         }
@@ -384,7 +400,11 @@ async function runStep(
 
 async function runProbe(
   probe: Probe,
-  ctx: RunStepContext & { stepRetries?: number; stepRetryDelayMs?: number },
+  ctx: RunStepContext & {
+    stepRetries?: number;
+    stepRetryDelayMs?: number;
+    allowShellMetacharacters?: boolean;
+  },
 ): Promise<ExecutionOutput> {
   const toolCalls: ToolCallRecord[] = [];
   const artifacts: ArtifactRef[] = [];
@@ -459,6 +479,7 @@ export async function executePlan(opts: {
    * to shed UI mutations from prior probes.
    */
   resetBetweenProbes?: boolean;
+  allowShellMetacharacters?: boolean;
 }): Promise<ExecutionOutput> {
   const toolCalls: ToolCallRecord[] = [];
   const artifacts: ArtifactRef[] = [];
@@ -473,6 +494,9 @@ export async function executePlan(opts: {
     ...(opts.runCommandAllowlist !== undefined
       ? { runCommandAllowlist: opts.runCommandAllowlist }
       : {}),
+    ...(opts.allowShellMetacharacters === true
+      ? { allowShellMetacharacters: true }
+      : {}),
   };
 
   for (const session of opts.plan.sessions) {
@@ -482,12 +506,12 @@ export async function executePlan(opts: {
     if (
       typeof opts.targetUrl === "string" &&
       opts.targetUrl.trim() &&
-      opts.capabilities.has("navigate") &&
+      opts.capabilities.has(Capability.navigate) &&
       opts.integrations.chrome
     ) {
       const res = await runStep(
         {
-          capability: "navigate",
+          capability: Capability.navigate,
           action: "navigate_page",
           args: { url: opts.targetUrl },
         },
@@ -510,6 +534,9 @@ export async function executePlan(opts: {
         ...(typeof opts.stepRetryDelayMs === "number"
           ? { stepRetryDelayMs: opts.stepRetryDelayMs }
           : {}),
+        ...(opts.allowShellMetacharacters === true
+          ? { allowShellMetacharacters: true }
+          : {}),
       });
       toolCalls.push(...res.toolCalls);
       artifacts.push(...res.artifacts);
@@ -520,12 +547,12 @@ export async function executePlan(opts: {
         opts.resetBetweenProbes !== false &&
         typeof opts.targetUrl === "string" &&
         opts.targetUrl.trim() &&
-        opts.capabilities.has("navigate") &&
+        opts.capabilities.has(Capability.navigate) &&
         opts.integrations.chrome
       ) {
         const nav = await runStep(
           {
-            capability: "navigate",
+            capability: Capability.navigate,
             action: "navigate_page",
             args: { url: opts.targetUrl },
           },

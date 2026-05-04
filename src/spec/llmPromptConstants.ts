@@ -6,3 +6,11 @@ export const OBSERVABLE_KINDS_PROMPT =
 
 export const REQUIREMENT_TYPES_PROMPT =
   '"structure"|"navigation"|"form"|"persistence"|"visible_state"|"appearance"|"accessibility"|"integration"' as const;
+
+/** Substrings that suggest the UI snapshot is echoing the LLM normalization prompt (self-test only). */
+export const SPEC_ECHO_MARKERS = [
+  "input spec ir",
+  "markdown spec:",
+  '"prompt":',
+  "convert the markdown spec below into json",
+] as const;

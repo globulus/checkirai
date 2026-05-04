@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Capability } from "../../capabilities/types.js";
 import type { RequirementIR } from "../../spec/ir.js";
 import type { Probe } from "../types.js";
 
@@ -6,19 +7,23 @@ export function planBasicAppearanceProbe(req: RequirementIR): Probe {
   return {
     id: randomUUID(),
     requirementId: req.id,
-    capabilityNeeds: ["read_visual", "read_ui_structure", "interact"],
+    capabilityNeeds: [
+      Capability.read_visual,
+      Capability.read_ui_structure,
+      Capability.interact,
+    ],
     sideEffects: "ui_only",
     costHint: 6,
     strategy: "basic_appearance",
     steps: [
       {
-        capability: "read_visual",
+        capability: Capability.read_visual,
         action: "take_screenshot",
         args: { label: req.id },
       },
       // Snapshot helps correlate visible text and structure for the judge.
       {
-        capability: "read_ui_structure",
+        capability: Capability.read_ui_structure,
         action: "take_snapshot",
         args: {},
       },
@@ -26,7 +31,7 @@ export function planBasicAppearanceProbe(req: RequirementIR): Probe {
       // This makes it possible for an LLM (or future deterministic judge) to verify
       // style expectations like “buttons are green”.
       {
-        capability: "interact",
+        capability: Capability.interact,
         action: "evaluate_script",
         args: {
           function:

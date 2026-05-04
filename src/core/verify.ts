@@ -5,9 +5,10 @@ import { pruneArtifactRuns } from "../artifacts/prune.js";
 import { ArtifactStore } from "../artifacts/store.js";
 import type { CapabilitySet } from "../capabilities/types.js";
 import { judgeDeterministic } from "../evaluators/judge.js";
+import { runTriageMarkdown } from "../evaluators/triageRun.js";
 import { executePlan } from "../executors/engine.js";
 import type { ExecutorIntegrations } from "../executors/integrations.js";
-import type { LlmPolicy } from "../llm/types.js";
+import { summarizeLlmPolicyForRun, type LlmPolicy } from "../llm/types.js";
 import { migrate, openDb } from "../persistence/db.js";
 import { insertArtifact } from "../persistence/repo/artifactRepo.js";
 import {
@@ -42,6 +43,12 @@ export type VerifyConstraints = {
   isolateProbeSessions?: boolean;
   /** Keep only the N most recent run artifact directories under the artifacts root. Omit to skip pruning. */
   artifactMaxRuns?: number;
+  /**
+   * When set to the same URL as `target.baseUrl`, enables spec-echo filtering for `text_present`
+   * (verifier dashboard self-test against prompt leakage).
+   */
+  selfTestTargetBaseUrl?: string;
+  allowShellMetacharacters?: boolean;
 };
 
 export type VerifyInput = {
@@ -52,11 +59,11 @@ export type VerifyInput = {
   constraints?: VerifyConstraints;
 };
 
-function llmModelForRunRow(llm?: LlmPolicy): string | null {
-  if (!llm) return null;
-  if (llm.provider === "ollama") return llm.ollamaModel ?? null;
-  if (llm.provider === "remote") return llm.remoteModel ?? null;
-  return null;
+function llmRowFields(llm?: LlmPolicy): {
+  llm_provider: string | null;
+  llm_model: string | null;
+} {
+  return summarizeLlmPolicyForRun(llm);
 }
 
 /**
@@ -86,13 +93,14 @@ export async function verify(input: VerifyInput): Promise<VerificationResult> {
   const db = openDb(dbPath);
   migrate(db);
 
+  const llmRow = llmRowFields(c?.llm);
   insertRun(db, {
     id: runId,
     created_at: createdAt,
     target_base_url: input.target.baseUrl,
     policy_name: c?.policyName ?? "read_only",
-    llm_provider: c?.llm?.provider ?? null,
-    llm_model: llmModelForRunRow(c?.llm),
+    llm_provider: llmRow.llm_provider,
+    llm_model: llmRow.llm_model,
     status: "running",
     confidence: null,
     summary_md_path: null,
@@ -135,6 +143,9 @@ export async function verify(input: VerifyInput): Promise<VerificationResult> {
       ...(typeof c?.stepRetryDelayMs === "number"
         ? { stepRetryDelayMs: c.stepRetryDelayMs }
         : {}),
+      ...(c?.allowShellMetacharacters === true
+        ? { allowShellMetacharacters: true }
+        : {}),
       abortSignal: ac.signal,
     });
 
@@ -156,6 +167,10 @@ export async function verify(input: VerifyInput): Promise<VerificationResult> {
       toolCalls: execOut.toolCalls,
       artifacts: execOut.artifacts,
       artifactRootDir: artifactRoot,
+      ...(c?.selfTestTargetBaseUrl !== undefined
+        ? { selfTestTargetBaseUrl: c.selfTestTargetBaseUrl }
+        : {}),
+      targetBaseUrl: input.target.baseUrl,
     });
 
     for (const rr of requirementResults) {
@@ -180,8 +195,31 @@ export async function verify(input: VerifyInput): Promise<VerificationResult> {
       meta: { runId, targetBaseUrl: input.target.baseUrl },
     });
 
-    updateRunStatus(db, runId, result.overall_status, result.confidence);
-    return VerificationResultSchema.parse(result);
+    let resultOut = result;
+    if (c?.llm && c.llm.triage.provider !== "none") {
+      const triageMd = await runTriageMarkdown({ policy: c.llm, result });
+      if (triageMd) {
+        const ref = artifactStore.writeText("llm_output", triageMd, {
+          metadata: { phase: "triage", kind: "triage_md" },
+        });
+        insertArtifact(db, {
+          id: ref.id,
+          run_id: runId,
+          type: ref.type,
+          path: join(artifactRoot, ref.path),
+          sha256: ref.sha256,
+          created_at: ref.createdAt,
+          metadata_json: ref.metadata ? JSON.stringify(ref.metadata) : null,
+        });
+        resultOut = VerificationResultSchema.parse({
+          ...result,
+          artifacts: [...result.artifacts, ref],
+        });
+      }
+    }
+
+    updateRunStatus(db, runId, resultOut.overall_status, resultOut.confidence);
+    return VerificationResultSchema.parse(resultOut);
   } catch (err) {
     const aborted =
       (err instanceof Error && err.name === "AbortError") ||
@@ -189,6 +227,7 @@ export async function verify(input: VerifyInput): Promise<VerificationResult> {
         err instanceof DOMException &&
         err.name === "AbortError");
     if (aborted) {
+      updateRunStatus(db, runId, "timed_out", 0);
       throw new VerifierError(
         "TIMEOUT",
         `Verify exceeded maxRunMs=${maxRunMs ?? 0}.`,

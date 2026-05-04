@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -6,7 +7,10 @@ import { z } from "zod";
 import { pruneArtifactRuns } from "../artifacts/prune.js";
 import { ArtifactStore } from "../artifacts/store.js";
 import { buildCapabilityGraph } from "../capabilities/registry.js";
-import { loadProjectConfig } from "../config/projectConfig.js";
+import {
+  loadProjectConfig,
+  mergeLlmPolicyWithProjectProfile,
+} from "../config/projectConfig.js";
 import {
   synthesizeMarkdownSummary,
   synthesizeResult,
@@ -22,7 +26,15 @@ import { createHttpIntegration } from "../integrations/http/httpIntegration.js";
 import { createShellIntegration } from "../integrations/shell/shellIntegration.js";
 import { checkOllamaRunning } from "../llm/modelOps.js";
 import { ollamaStopModel } from "../llm/ollamaCli.js";
-import { type LlmPolicy, LlmPolicySchema } from "../llm/types.js";
+import { runTriageMarkdown } from "../evaluators/triageRun.js";
+import {
+  ollamaModelsFromPolicy,
+  policyJudgeOrPlannerActive,
+  policyUsesOllama,
+  summarizeLlmPolicyForRun,
+  type LlmPolicy,
+  LlmPolicySchema,
+} from "../llm/types.js";
 import type { McpServerConfig } from "../mcp/types.js";
 import {
   findLatestLlmOutputByKind,
@@ -42,6 +54,10 @@ import {
 import { insertToolCalls } from "../persistence/repo/toolCallRepo.js";
 import { planWithSelfConsistency } from "../planners/llmPlanner.js";
 import { planStepsWithLlm } from "../planners/llmStepPlanner.js";
+import {
+  DEFAULT_BUTTON_STYLE_TOOL_CALL,
+  mergeButtonStyleEvidenceIfNeeded,
+} from "../planners/buttonStyleEvidence.js";
 import {
   requiredPolicyForCapabilities,
   type TestPlanIR,
@@ -121,6 +137,12 @@ export type VerifySpecInput = {
   stepRetryDelayMs?: number;
   isolateProbeSessions?: boolean;
   artifactMaxRuns?: number;
+  /** When set, run via shell before probes (requires `http` in tools to poll readiness). */
+  launchCommand?: string;
+  launchCwd?: string;
+  /** Max wait for `targetUrl` to respond after spawn (default 30s). */
+  launchReadyTimeoutMs?: number;
+  selfTestTargetBaseUrl?: string;
 };
 
 export async function verifySpec(
@@ -144,13 +166,16 @@ export async function verifySpec(
   const isolateProbeSessions =
     input.isolateProbeSessions ?? def?.isolateProbeSessions;
   const artifactMaxRuns = input.artifactMaxRuns ?? def?.artifactMaxRuns;
+  const allowShellMetacharacters = def?.allowShellMetacharacters === true;
   if (typeof artifactMaxRuns === "number" && artifactMaxRuns > 0) {
     pruneArtifactRuns(artifactsDir, artifactMaxRuns);
   }
 
-  const llmPolicy = LlmPolicySchema.parse(
-    input.llm ?? projectCfg?.llm ?? { provider: "ollama" },
+  const llmPolicy = mergeLlmPolicyWithProjectProfile(
+    LlmPolicySchema.parse(input.llm ?? projectCfg?.llm ?? {}),
+    projectCfg ?? undefined,
   );
+  const llmRunRow = summarizeLlmPolicyForRun(llmPolicy);
   const requestedPolicy: PolicyName = input.policyName ?? "read_only";
 
   const restartFromPhase = RestartFromPhaseSchema.parse(
@@ -187,13 +212,8 @@ export async function verifySpec(
     created_at: createdAt,
     target_base_url: input.targetUrl,
     policy_name: null,
-    llm_provider: llmPolicy.provider,
-    llm_model:
-      llmPolicy.provider === "ollama"
-        ? llmPolicy.ollamaModel
-        : llmPolicy.provider === "remote"
-          ? (llmPolicy.remoteModel ?? null)
-          : null,
+    llm_provider: llmRunRow.llm_provider,
+    llm_model: llmRunRow.llm_model,
     status: "running",
     confidence: null,
     summary_md_path: null,
@@ -217,6 +237,8 @@ export async function verifySpec(
   const recordModel = (m: string) => {
     if (typeof m === "string" && m.trim()) ollamaModelsUsed.add(m.trim());
   };
+
+  let launchChild: ChildProcess | undefined;
 
   try {
     // Resolve spec
@@ -374,7 +396,7 @@ export async function verifySpec(
       },
     });
 
-    if (llmPolicy.provider === "ollama") {
+    if (policyUsesOllama(llmPolicy)) {
       const toolCallId = randomUUID();
       const startedAtIso = nowIso();
       publish({
@@ -384,7 +406,10 @@ export async function verifySpec(
         capability: "preflight",
         action: "check_ollama",
         startedAt: startedAtIso,
-        args: { host: llmPolicy.ollamaHost, model: llmPolicy.ollamaModel },
+        args: {
+          host: llmPolicy.ollamaHost,
+          models: ollamaModelsFromPolicy(llmPolicy),
+        },
       });
       const status = await checkOllamaRunning(llmPolicy.ollamaHost);
       publish({
@@ -428,11 +453,19 @@ export async function verifySpec(
     if (toolSet.has("shell"))
       integrations.shell = createShellIntegration({ allowCommands: [] });
 
-    // Preflight: ensure target is reachable before we spawn browser tools.
+    // Preflight: optional launchCommand, then ensure target is reachable.
     if (toolSet.has("http")) {
       const http = integrations.http as ReturnType<
         typeof createHttpIntegration
       >;
+      if (input.launchCommand?.trim()) {
+        launchChild = spawn(input.launchCommand.trim(), {
+          shell: true,
+          cwd: input.launchCwd?.trim() || undefined,
+          stdio: "ignore",
+        });
+      }
+
       const toolCallId = randomUUID();
       const startedAtIso = nowIso();
       publish({
@@ -442,13 +475,39 @@ export async function verifySpec(
         capability: "preflight",
         action: "check_target_url",
         startedAt: startedAtIso,
-        args: { url: input.targetUrl },
+        args: {
+          url: input.targetUrl,
+          ...(input.launchCommand?.trim()
+            ? { launchCommand: input.launchCommand.trim() }
+            : {}),
+        },
       });
       try {
-        const res = await http.get(input.targetUrl, {
-          // Avoid downloading huge bodies; just see if the server responds.
-          headers: { range: "bytes=0-200" },
-        });
+        const maxWaitMs = input.launchCommand?.trim()
+          ? (input.launchReadyTimeoutMs ?? 30_000)
+          : 15_000;
+        const deadline = Date.now() + maxWaitMs;
+        let res: Awaited<ReturnType<typeof http.get>> | undefined;
+        while (Date.now() < deadline) {
+          try {
+            const attempt = await http.get(input.targetUrl, {
+              headers: { range: "bytes=0-200" },
+            });
+            if (attempt.status < 500) {
+              res = attempt;
+              break;
+            }
+          } catch {
+            // keep polling when launchCommand is warming up
+          }
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        if (!res) {
+          throw new VerifierError(
+            "TOOL_UNAVAILABLE",
+            `Target URL did not become reachable within ${maxWaitMs}ms: ${input.targetUrl}`,
+          );
+        }
         if (res.status >= 500) {
           throw new VerifierError(
             "TOOL_UNAVAILABLE",
@@ -479,12 +538,23 @@ export async function verifySpec(
           ok: false,
           errorMessage: e instanceof Error ? e.message : String(e),
         });
+        if (launchChild && !launchChild.killed) {
+          try {
+            launchChild.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
+        }
         throw new VerifierError(
           "TOOL_UNAVAILABLE",
           `Target URL is not reachable: ${input.targetUrl}`,
           { cause: e },
         );
       }
+    } else if (input.launchCommand?.trim()) {
+      throw new Error(
+        "launchCommand is set but tools do not include 'http' (needed to poll target readiness).",
+      );
     }
 
     if (toolSet.has("chrome-devtools")) {
@@ -553,7 +623,7 @@ export async function verifySpec(
     // Fallback: legacy probe-based flow if planner/executor/judge fails.
     const chrome = (integrations as ExecutorIntegrations).chrome;
     const canUseGenericLlmLoop =
-      llmPolicy.provider !== "none" && Boolean(chrome);
+      policyJudgeOrPlannerActive(llmPolicy) && Boolean(chrome);
 
     if (restartFromPhase === "llm_plan" && !canUseGenericLlmLoop) {
       throw new Error(
@@ -570,9 +640,19 @@ export async function verifySpec(
       try {
         // LLM step planning (proceduralization) for legacy probes
         if (
-          llmPolicy.provider !== "none" &&
+          policyJudgeOrPlannerActive(llmPolicy) &&
           (integrations as ExecutorIntegrations).chrome
         ) {
+          const probePlanId = randomUUID();
+          const probePlanStarted = nowIso();
+          publish({
+            type: "step_started",
+            runId,
+            toolCallId: probePlanId,
+            capability: "planning",
+            action: "plan_probe_steps",
+            startedAt: probePlanStarted,
+          });
           try {
             const chromeTools = await (
               integrations as ExecutorIntegrations
@@ -584,8 +664,30 @@ export async function verifySpec(
               chromeTools,
             });
             specIr = planned.spec;
+            publish({
+              type: "step_finished",
+              runId,
+              toolCallId: probePlanId,
+              capability: "planning",
+              action: "plan_probe_steps",
+              startedAt: probePlanStarted,
+              endedAt: nowIso(),
+              ok: true,
+              result: { updatedSpec: true },
+            });
           } catch {
             // Best-effort: if planning fails, continue with non-procedural probes.
+            publish({
+              type: "step_finished",
+              runId,
+              toolCallId: probePlanId,
+              capability: "planning",
+              action: "plan_probe_steps",
+              startedAt: probePlanStarted,
+              endedAt: nowIso(),
+              ok: true,
+              result: { continuedWithoutPlanner: true },
+            });
           }
         }
 
@@ -628,6 +730,9 @@ export async function verifySpec(
           targetUrl: input.targetUrl,
           abortSignal: ac.signal,
           ...(runCommandAllowlist !== undefined ? { runCommandAllowlist } : {}),
+          ...(allowShellMetacharacters
+            ? { allowShellMetacharacters: true }
+            : {}),
           ...(typeof stepRetries === "number" ? { stepRetries } : {}),
           ...(typeof stepRetryDelayMs === "number" ? { stepRetryDelayMs } : {}),
           onEvent: (e) => {
@@ -643,17 +748,32 @@ export async function verifySpec(
           toolCalls: execOut.toolCalls,
           artifacts: execOut.artifacts,
           artifactRootDir: artifactsDir,
+          ...(typeof input.selfTestTargetBaseUrl === "string"
+            ? { selfTestTargetBaseUrl: input.selfTestTargetBaseUrl }
+            : {}),
+          targetBaseUrl: input.targetUrl,
         });
 
         let llmSecondPassMeta:
           | { attempted: number; applied: number }
           | { attempted: number; applied: number; error: string }
           | undefined;
-        if (llmPolicy.provider !== "none") {
+        if (llmPolicy.judge.provider !== "none") {
           const inconclusiveIds = requirementResults
             .filter((r) => r.verdict === "inconclusive")
             .map((r) => r.requirement_id);
           if (inconclusiveIds.length) {
+            const secondPassId = randomUUID();
+            const secondPassStarted = nowIso();
+            publish({
+              type: "step_started",
+              runId,
+              toolCallId: secondPassId,
+              capability: "judgment",
+              action: "llm_judge_second_pass",
+              startedAt: secondPassStarted,
+              args: { inconclusiveCount: inconclusiveIds.length },
+            });
             try {
               const before = new Map(
                 requirementResults.map(
@@ -685,12 +805,36 @@ export async function verifySpec(
                 attempted: inconclusiveIds.length,
                 applied,
               };
+              publish({
+                type: "step_finished",
+                runId,
+                toolCallId: secondPassId,
+                capability: "judgment",
+                action: "llm_judge_second_pass",
+                startedAt: secondPassStarted,
+                endedAt: nowIso(),
+                ok: true,
+                result: llmSecondPassMeta,
+              });
             } catch (e) {
               llmSecondPassMeta = {
                 attempted: inconclusiveIds.length,
                 applied: 0,
                 error: e instanceof Error ? e.message : String(e),
               };
+              publish({
+                type: "step_finished",
+                runId,
+                toolCallId: secondPassId,
+                capability: "judgment",
+                action: "llm_judge_second_pass",
+                startedAt: secondPassStarted,
+                endedAt: nowIso(),
+                ok: false,
+                errorMessage:
+                  e instanceof Error ? e.message : String(e),
+                result: llmSecondPassMeta,
+              });
             }
           }
         }
@@ -768,14 +912,15 @@ export async function verifySpec(
         const startedAtIso2 = nowIso();
         let planned: { plan: TestPlanIR; meta: Record<string, unknown> };
 
+        const toolDescriptors = chromeTools.map((t) => ({
+          name: t.name,
+          ...(t.description ? { description: t.description } : {}),
+          ...(t.inputSchema !== undefined
+            ? { inputSchema: t.inputSchema }
+            : {}),
+        }));
+
         if (restartFromPhase === "llm_plan") {
-          const toolDescriptors = chromeTools.map((t) => ({
-            name: t.name,
-            ...(t.description ? { description: t.description } : {}),
-            ...(t.inputSchema !== undefined
-              ? { inputSchema: t.inputSchema }
-              : {}),
-          }));
           publish({
             type: "step_started",
             runId,
@@ -832,12 +977,35 @@ export async function verifySpec(
             });
             throw new Error(msg);
           }
+          const mergedPlan = mergeButtonStyleEvidenceIfNeeded(
+            specIr,
+            parsedPlan,
+          );
+          const validationMerged = validatePlan(mergedPlan, toolDescriptors);
+          if (!validationMerged.ok) {
+            const msg = `Cached plan invalid after style-evidence merge: ${validationMerged.issues
+              .slice(0, 5)
+              .map((i) => i.message)
+              .join("; ")}`;
+            publish({
+              type: "step_finished",
+              runId,
+              toolCallId: toolCallId2,
+              capability: "planning",
+              action: "llm_plan_with_self_consistency",
+              startedAt: startedAtIso2,
+              endedAt: nowIso(),
+              ok: false,
+              errorMessage: msg,
+            });
+            throw new Error(msg);
+          }
           planned = {
-            plan: parsedPlan,
+            plan: mergedPlan,
             meta: {
               resumedFromRunId: parentRunId,
               skippedLlm: true,
-              validationScore: validation.score,
+              validationScore: validationMerged.score,
             },
           };
           persistLlmOutputJsonArtifact({
@@ -881,8 +1049,21 @@ export async function verifySpec(
               attempts: 5,
               onSelectedModel: recordModel,
             });
+            const mergedPlan = mergeButtonStyleEvidenceIfNeeded(
+              specIr,
+              out.plan,
+            );
+            const validationMerged = validatePlan(mergedPlan, toolDescriptors);
+            if (!validationMerged.ok) {
+              throw new Error(
+                `Plan invalid after style-evidence merge: ${validationMerged.issues
+                  .slice(0, 8)
+                  .map((i) => i.message)
+                  .join("; ")}`,
+              );
+            }
             planned = {
-              plan: out.plan,
+              plan: mergedPlan,
               meta: out.meta as Record<string, unknown>,
             };
             persistLlmOutputJsonArtifact({
@@ -939,26 +1120,7 @@ export async function verifySpec(
               args: {},
               label: "dashboard",
             },
-            {
-              capability: "interact",
-              tool: "evaluate_script",
-              args: {
-                function: `() => {
-  const buttons = Array.from(document.querySelectorAll("button"));
-  return buttons.map((b) => {
-    const cs = getComputedStyle(b);
-    const text = (b.innerText || b.textContent || "").trim();
-    return {
-      text,
-      color: cs.color,
-      backgroundColor: cs.backgroundColor,
-      borderColor: cs.borderColor,
-    };
-  });
-}`,
-              },
-              label: "button_styles",
-            },
+            DEFAULT_BUTTON_STYLE_TOOL_CALL,
           ];
         }
 
@@ -988,15 +1150,56 @@ export async function verifySpec(
           },
         });
 
-        const judged = await judgeWithSelfConsistency({
-          llm: llmPolicy,
-          spec: specIr,
-          plan: planned.plan,
-          toolCalls: execOut.toolCalls,
-          artifacts: execOut.artifacts,
-          artifactRootDir: artifactsDir,
-          attempts: 3,
-          onSelectedModel: recordModel,
+        const judgeId = randomUUID();
+        const judgeStartedAt = nowIso();
+        publish({
+          type: "step_started",
+          runId,
+          toolCallId: judgeId,
+          capability: "judgment",
+          action: "llm_judge_self_consistency",
+          startedAt: judgeStartedAt,
+          args: {
+            requirementCount: specIr.requirements.length,
+            attempts: 3,
+          },
+        });
+        let judged: Awaited<ReturnType<typeof judgeWithSelfConsistency>>;
+        try {
+          judged = await judgeWithSelfConsistency({
+            llm: llmPolicy,
+            spec: specIr,
+            plan: planned.plan,
+            toolCalls: execOut.toolCalls,
+            artifacts: execOut.artifacts,
+            artifactRootDir: artifactsDir,
+            attempts: 3,
+            onSelectedModel: recordModel,
+          });
+        } catch (e) {
+          publish({
+            type: "step_finished",
+            runId,
+            toolCallId: judgeId,
+            capability: "judgment",
+            action: "llm_judge_self_consistency",
+            startedAt: judgeStartedAt,
+            endedAt: nowIso(),
+            ok: false,
+            errorMessage: e instanceof Error ? e.message : String(e),
+          });
+          throw e;
+        }
+        publish({
+          type: "step_finished",
+          runId,
+          toolCallId: judgeId,
+          capability: "judgment",
+          action: "llm_judge_self_consistency",
+          startedAt: judgeStartedAt,
+          endedAt: nowIso(),
+          ok: true,
+          result: judged.meta,
         });
         requirementResults = judged.results;
         metaExtra.llm_judge = judged.meta;
@@ -1079,15 +1282,89 @@ export async function verifySpec(
       },
     });
 
+    let resultOut = result;
+    if (llmPolicy.triage.provider !== "none") {
+      const triageId = randomUUID();
+      const triageStarted = nowIso();
+      publish({
+        type: "step_started",
+        runId,
+        toolCallId: triageId,
+        capability: "triage",
+        action: "summarize_run",
+        startedAt: triageStarted,
+      });
+      let triageMd: string;
+      try {
+        triageMd = await runTriageMarkdown({
+          policy: llmPolicy,
+          result,
+          hooks: { onSelectedModel: recordModel },
+        });
+      } catch (e) {
+        publish({
+          type: "step_finished",
+          runId,
+          toolCallId: triageId,
+          capability: "triage",
+          action: "summarize_run",
+          startedAt: triageStarted,
+          endedAt: nowIso(),
+          ok: false,
+          errorMessage: e instanceof Error ? e.message : String(e),
+        });
+        throw e;
+      }
+      publish({
+        type: "step_finished",
+        runId,
+        toolCallId: triageId,
+        capability: "triage",
+        action: "summarize_run",
+        startedAt: triageStarted,
+        endedAt: nowIso(),
+        ok: true,
+        result: { chars: triageMd.length },
+      });
+      if (triageMd.trim()) {
+        const store = new ArtifactStore({
+          rootDir: artifactsDir,
+          runId,
+        });
+        const ref = store.writeText("llm_output", triageMd, {
+          ext: "md",
+          metadata: { phase: "triage", kind: "triage_md" },
+        });
+        insertArtifact(ctx.db, {
+          id: ref.id,
+          run_id: runId,
+          type: ref.type,
+          path: join(artifactsDir, ref.path),
+          sha256: ref.sha256,
+          created_at: ref.createdAt,
+          metadata_json: ref.metadata ? JSON.stringify(ref.metadata) : null,
+        });
+        resultOut = {
+          ...result,
+          artifacts: [...result.artifacts, ref],
+        };
+      }
+    }
+
     // Write report + summary
     const runDir = join(runsDir, runId);
     ensureDir(runDir);
     const reportPath = join(runDir, "report.json");
     const summaryPath = join(runDir, "summary.md");
-    writeFileSync(reportPath, JSON.stringify(result, null, 2), "utf8");
-    writeFileSync(summaryPath, synthesizeMarkdownSummary(result), "utf8");
+    writeFileSync(reportPath, JSON.stringify(resultOut, null, 2), "utf8");
+    writeFileSync(summaryPath, synthesizeMarkdownSummary(resultOut), "utf8");
 
-    updateRunStatus(ctx.db, runId, result.overall_status, result.confidence);
+    updateRunStatus(
+      ctx.db,
+      runId,
+      resultOut.overall_status,
+      resultOut.confidence,
+    );
 
     // Best-effort: store paths
     const stmt = ctx.db.prepare(`
@@ -1107,20 +1384,25 @@ export async function verifySpec(
       type: "run_finished",
       runId,
       endedAt,
-      status: result.overall_status,
-      confidence: result.confidence,
+      status: resultOut.overall_status,
+      confidence: resultOut.confidence,
     });
     opts?.onEvent?.({
       type: "run_finished",
       runId,
       endedAt,
-      status: result.overall_status,
-      confidence: result.confidence,
+      status: resultOut.overall_status,
+      confidence: resultOut.confidence,
     });
 
-    return { runId, result };
+    return { runId, result: resultOut };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
+    const aborted =
+      (e instanceof Error && e.name === "AbortError") ||
+      (typeof DOMException !== "undefined" &&
+        e instanceof DOMException &&
+        e.name === "AbortError");
     const code =
       e &&
       typeof e === "object" &&
@@ -1133,7 +1415,7 @@ export async function verifySpec(
         ? (e as any).details
         : undefined;
 
-    updateRunStatus(ctx.db, runId, "error");
+    updateRunStatus(ctx.db, runId, aborted ? "timed_out" : "error", 0);
     publish({
       type: "run_error",
       runId,
@@ -1146,13 +1428,21 @@ export async function verifySpec(
       type: "run_finished",
       runId,
       endedAt: nowIso(),
-      status: "error",
+      status: aborted ? "timed_out" : "error",
+      confidence: 0,
     });
     throw e;
   } finally {
+    if (launchChild && !launchChild.killed) {
+      try {
+        launchChild.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }
     // Best-effort: unload any Ollama models used during this run to free RAM.
     // Do NOT kill the Ollama daemon; just ask it to stop the model(s).
-    if (llmPolicy.provider === "ollama" && ollamaModelsUsed.size > 0) {
+    if (policyUsesOllama(llmPolicy) && ollamaModelsUsed.size > 0) {
       await Promise.all(
         [...ollamaModelsUsed].map((model) =>
           ollamaStopModel({ host: llmPolicy.ollamaHost, model }).catch(() => ({

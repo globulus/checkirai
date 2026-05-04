@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Capability } from "../../capabilities/types.js";
 import type { RequirementIR } from "../../spec/ir.js";
 import type { Probe } from "../types.js";
 
@@ -6,18 +7,18 @@ export function planFormProbe(req: RequirementIR): Probe {
   return {
     id: randomUUID(),
     requirementId: req.id,
-    capabilityNeeds: ["interact", "read_ui_structure"],
+    capabilityNeeds: [Capability.interact, Capability.read_ui_structure],
     sideEffects: "ui_only",
     costHint: 3,
     strategy: "form",
     steps: [
       {
-        capability: "interact",
+        capability: Capability.interact,
         action: "run_steps",
         args: { actions: req.actions ?? [] },
       },
       {
-        capability: "read_ui_structure",
+        capability: Capability.read_ui_structure,
         action: "snapshot_a11y_tree",
         args: {},
       },

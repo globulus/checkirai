@@ -102,6 +102,8 @@ describe("judgeDeterministic", () => {
       toolCalls: [mkToolCall(runId, probeId, art.id)],
       artifacts: [art],
       artifactRootDir: root,
+      selfTestTargetBaseUrl: "http://127.0.0.1:1/",
+      targetBaseUrl: "http://127.0.0.1:1/",
     });
 
     expect(out[0]?.verdict).toBe("fail");

@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import pino from "pino";
-import { loadProjectConfig } from "../../config/projectConfig.js";
+import {
+  loadProjectConfig,
+  mergeLlmPolicyWithProjectProfile,
+} from "../../config/projectConfig.js";
 import { LlmPolicySchema } from "../../llm/types.js";
 import {
   chromeDevtoolsListTools,
@@ -39,9 +42,16 @@ export async function main(argv = process.argv) {
     )
     .option("--out <dir>", "Output directory root", ".verifier")
     .option("--policy <name>", "Policy name: read_only|ui_only", "read_only")
-    .option("--llm-provider <provider>", "ollama|remote|none", "ollama")
+    .option(
+      "--llm-provider <provider>",
+      "ollama|remote|none (applies to all roles when set)",
+      "ollama",
+    )
     .option("--ollama-host <url>", "Ollama host", "http://127.0.0.1:11434")
-    .option("--ollama-model <name>", "Ollama model name or 'auto'", "auto")
+    .option(
+      "--ollama-model <name>",
+      "Override Ollama model tag for all roles (omit to use config per-role defaults)",
+    )
     .option("--allow-auto-pull", "Allow pulling missing Ollama models", true)
     .option(
       "--restart-from <phase>",
@@ -75,12 +85,43 @@ export async function main(argv = process.argv) {
         return;
       }
 
-      const llmPolicy = LlmPolicySchema.parse({
-        provider: opts.llmProvider,
-        ollamaHost: opts.ollamaHost,
-        ollamaModel: opts.ollamaModel,
-        allowAutoPull: Boolean(opts.allowAutoPull),
-      });
+      const projectCfg = loadProjectConfig();
+      const baseLlm = mergeLlmPolicyWithProjectProfile(
+        LlmPolicySchema.parse(projectCfg.config?.llm ?? {}),
+        projectCfg.config ?? undefined,
+      );
+      const prov = String(opts.llmProvider ?? "ollama");
+      let llmPolicy: ReturnType<typeof LlmPolicySchema.parse>;
+      if (prov === "none") {
+        const off = { provider: "none" as const, model: "disabled" };
+        llmPolicy = LlmPolicySchema.parse({
+          ...baseLlm,
+          normalizer: { ...baseLlm.normalizer, ...off },
+          plannerAssist: { ...baseLlm.plannerAssist, ...off },
+          judge: { ...baseLlm.judge, ...off },
+          triage: { ...baseLlm.triage, ...off },
+        });
+      } else {
+        llmPolicy = LlmPolicySchema.parse({
+          ...baseLlm,
+          ollamaHost: String(opts.ollamaHost),
+          allowAutoPull: Boolean(opts.allowAutoPull),
+        });
+      }
+      if (
+        prov !== "none" &&
+        typeof opts.ollamaModel === "string" &&
+        opts.ollamaModel.trim()
+      ) {
+        const m = opts.ollamaModel.trim();
+        llmPolicy = LlmPolicySchema.parse({
+          ...llmPolicy,
+          normalizer: { ...llmPolicy.normalizer, model: m },
+          plannerAssist: { ...llmPolicy.plannerAssist, model: m },
+          judge: { ...llmPolicy.judge, model: m },
+          triage: { ...llmPolicy.triage, model: m },
+        });
+      }
 
       const specMd =
         typeof opts.spec === "string" && opts.spec.trim()
@@ -93,7 +134,6 @@ export async function main(argv = process.argv) {
           .map((s) => s.trim())
           .filter(Boolean),
       );
-      const projectCfg = loadProjectConfig();
       const chromeDevtoolsServerRaw =
         projectCfg.config?.mcpServers?.["chrome-devtools"] ?? null;
       const chromeDevtoolsServer = chromeDevtoolsServerRaw
@@ -183,8 +223,14 @@ export async function main(argv = process.argv) {
     .action((opts) => {
       const ctx = createOpsContext();
       const recs = modelSuggest(ctx, { requireTooling: Boolean(opts.tooling) });
+      logger.info(recs.hardware, "host_ram_hardware_hint");
+      for (const r of recs.modelsMatchingRam ?? [])
+        logger.info(
+          { name: r.name, notes: r.notes, approxQ4RamGiB: r.approxQ4RamGiB },
+          "recommended_for_ram",
+        );
       for (const r of recs.models)
-        logger.info({ name: r.name, notes: r.notes }, "recommended");
+        logger.info({ name: r.name, notes: r.notes }, "recommended_all");
       process.exitCode = 0;
     });
 

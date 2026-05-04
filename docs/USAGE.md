@@ -8,7 +8,7 @@ It runs as:
 - **MCP server (stdio)** — for Cursor and other hosts that speak the Model Context Protocol  
 - **Web dashboard** — API + UI for interactive runs and progress  
 
-Execution is **policy-gated** (e.g. read-only vs UI-oriented). LLM-assisted phases default to **Ollama** on your machine; you can switch to a **`remote`** OpenAI-compatible API via **`checkirai.config.json`** (see below). The pipeline is wired end-to-end (normalize → plan → execute → judge → synthesize). **`run_command`** is **allowlist-only** (empty list means shell steps never run). Some probes and browser automation paths are still evolving—treat edge verdicts and tooling as improving over time.
+Execution is **policy-gated** (e.g. read-only vs UI-oriented). LLM-assisted phases use a **per-role** policy in **`checkirai.config.json`** (`normalizer`, `plannerAssist`, `judge`, `triage`): each role can be **Ollama**, **remote**, or **none**, with its own **`model`**, optional **`fallbackModel`**, **`temperature`**, **`maxRetries`**, and remote URL/key when applicable. Optional **`profiles`** plus **`defaults.profile`** (or **`CHECKIRAI_PROFILE`**) merge smaller models for constrained machines. The pipeline is wired end-to-end (normalize → plan → execute → judge → triage → synthesize). **`run_command`** is **allowlist-only** (empty list means shell steps never run) and blocks shell **metacharacters** unless **`defaults.allowShellMetacharacters`** is true. Some probes and browser automation paths are still evolving—treat edge verdicts and tooling as improving over time.
 
 **Requirements:** Node.js **22+**, **pnpm**. Optional: Ollama, Playwright browsers if you use `playwright-mcp` in `--tools`.
 
@@ -67,11 +67,13 @@ checkirai verify \
   --out .verifier
 ```
 
-**`--tools`** is a comma-separated list. Supported tokens include: `fs`, `http`, `shell`, `playwright-mcp`, `chrome-devtools`. The CLI default is `fs,http`. The web dashboard may pick up `defaults.tools` from `checkirai.config.json` when you omit tools on a request (see below).
+**`--tools`** is a comma-separated list of **integration** tokens (what to wire up): `fs`, `http`, `shell`, `playwright-mcp`, `chrome-devtools`. The CLI default is `fs,http`. The web dashboard may pick up `defaults.tools` from `checkirai.config.json` when you omit tools on a request (see below).
 
-**Other useful `verify` flags:** `--policy read_only|ui_only`, `--llm-provider ollama|remote|none`, `--ollama-host`, `--ollama-model`, `--restart-from start|spec_ir|llm_plan` with `--restart-run <parentRunId>` to reuse artifacts from a previous run.
+Those tools map to a **capability graph** of verifier **capabilities**—the atomic actions probes may use—such as: **`navigate`**, **`read_ui_structure`**, **`read_visual`**, **`interact`**, **`read_console`**, **`read_network`**, **`read_files`**, **`run_command`**, **`call_http`**, **`query_data_store`**, **`read_source_code`**, **`read_design_reference`**. The canonical list is **`ALL_CAPABILITY_NAMES`** in **`src/capabilities/types.ts`**; MCP **`list_capabilities`** describes what is available for a given **`tools`** string.
 
-**Timeouts, retries, shell allowlist, probe isolation, artifact pruning:** set these under **`defaults`** in **`checkirai.config.json`** (or `.checkirai/config.json`)—they are merged for CLI, web API, and MCP runs (see **Project configuration**). There is no separate CLI flag for every knob yet.
+**Other useful `verify` flags:** `--policy read_only|ui_only`, `--llm-provider ollama|none` (applies to all roles: **`none`** disables every role; **`ollama`** keeps per-role config from the file), `--ollama-host`, `--ollama-model` (when set, overrides **every** Ollama role’s **`model`** after merge—omit to keep per-role tags from config), `--restart-from start|spec_ir|llm_plan` with `--restart-run <parentRunId>` to reuse artifacts from a previous run.
+
+**Timeouts, retries, shell allowlist, metacharacters opt-in, probe isolation, artifact pruning:** set these under **`defaults`** in **`checkirai.config.json`** (or `.checkirai/config.json`)—they are merged for CLI, web API, and MCP runs (see **Project configuration**). There is no separate CLI flag for every knob yet.
 
 ### Outputs
 
@@ -96,35 +98,69 @@ At the repo root (or `.checkirai/config.json`), you can set defaults, LLM policy
 
 | Section | Purpose |
 | ------- | ------- |
-| **`defaults`** | `targetUrl`, `tools`, `outRoot` (web API uses these when the request omits a field). Also: **`maxRunMs`** (overall cap), **`runCommandAllowlist`** (string prefixes or full command lines; use `"*"` only if you trust every probe; **omit or `[]` = no `run_command` execution**), **`stepRetries`** / **`stepRetryDelayMs`**, **`isolateProbeSessions`** (fresh browser session per probe when supported), **`artifactMaxRuns`** (keep only the newest N per-run artifact directories under `artifacts/`). |
-| **`llm`** | `provider`: `ollama` \| `remote` \| `none`. Ollama: `ollamaHost`, `ollamaModel`, `allowAutoPull`, etc. **Remote:** `remoteBaseUrl`, `remoteApiKey`, `remoteModel` (OpenAI-compatible chat completions). Prefer env-backed secrets in your own deployment; the file is plain JSON. |
+| **`defaults`** | `targetUrl`, `tools`, `outRoot`, optional **`profile`** (key into **`profiles`** for LLM hardware overrides). Also: **`maxRunMs`**, **`runCommandAllowlist`**, **`allowShellMetacharacters`** (allow `;&|…` in allowlisted `run_command`—dangerous; default false), **`stepRetries`** / **`stepRetryDelayMs`**, **`isolateProbeSessions`**, **`artifactMaxRuns`**. |
+| **`llm`** | Shared: **`ollamaHost`**, **`allowAutoPull`**, **`requireToolCapable`**. Per role **`normalizer`**, **`plannerAssist`**, **`judge`**, **`triage`**: **`provider`** (`ollama` \| `remote` \| `none`), **`model`**, optional **`fallbackModel`**, **`temperature`**, **`maxRetries`**, **`timeoutMs`**; for **`remote`**, **`remoteBaseUrl`** and **`remoteApiKey`** on that role. Prefer env-backed secrets in production; the file is plain JSON. |
+| **`profiles`** | Optional object (e.g. `laptop_16gb`) whose values are partial **`llm`**-shaped patches (per-role fields only) merged when **`defaults.profile`** or **`CHECKIRAI_PROFILE`** matches the key. |
 | **`mcpServers`** | e.g. `chrome-devtools` with `command` / `args` / `cwd` / `env` so **`checkirai verify`** can spawn Chrome DevTools MCP when `--tools` includes `chrome-devtools`. |
 
-The CLI loads this file from the current working directory. The dashboard loads it for **merged defaults** and Chrome DevTools spawn configuration.
+The CLI loads this file from the current working directory. The dashboard loads it for **merged defaults**, initial **LLM** form state, Chrome DevTools spawn configuration, and profile hints.
 
 ---
 
-## Remote LLM example (`llm.provider: "remote"`)
+## Example: per-role Ollama + hardware profile
 
 ```json
 {
   "version": 1,
-  "llm": {
-    "provider": "remote",
-    "remoteBaseUrl": "https://api.example.com/v1",
-    "remoteApiKey": "sk-…",
-    "remoteModel": "gpt-4.1-mini",
-    "allowAutoPull": false
-  },
   "defaults": {
-    "maxRunMs": 900000,
-    "runCommandAllowlist": ["pnpm test*", "npm run build"],
-    "isolateProbeSessions": false
+    "targetUrl": "http://localhost:5173",
+    "tools": "fs,http,chrome-devtools",
+    "profile": "laptop_16gb"
+  },
+  "llm": {
+    "ollamaHost": "http://127.0.0.1:11434",
+    "allowAutoPull": true,
+    "requireToolCapable": true,
+    "normalizer": {
+      "provider": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "fallbackModel": "qwen2.5:7b-instruct",
+      "temperature": 0.1,
+      "maxRetries": 3
+    },
+    "plannerAssist": {
+      "provider": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "temperature": 0.2
+    },
+    "judge": {
+      "provider": "ollama",
+      "model": "deepseek-r1:14b",
+      "fallbackModel": "qwen2.5:14b-instruct",
+      "temperature": 0,
+      "maxRetries": 2
+    },
+    "triage": {
+      "provider": "ollama",
+      "model": "deepseek-r1:14b",
+      "temperature": 0.1
+    }
+  },
+  "profiles": {
+    "laptop_16gb": {
+      "normalizer": { "model": "qwen2.5:7b-instruct" },
+      "judge": {
+        "model": "qwen2.5:14b-instruct",
+        "fallbackModel": "qwen2.5:7b-instruct"
+      }
+    }
   }
 }
 ```
 
-Use **`--llm-provider remote`** on the CLI only together with this file; the CLI does not accept API keys on the command line.
+## Example: remote on one role (e.g. judge only)
+
+Set **`provider`** / **`remoteBaseUrl`** / **`remoteApiKey`** / **`model`** on **`judge`** (and keep other roles on Ollama or **`none`**). The CLI does not pass API keys on the command line—use the config file (or MCP **`verify_spec`** with a full **`llm`** JSON body).
 
 ---
 
@@ -140,7 +176,9 @@ Local UI + API for starting runs, streaming events, and browsing history.
 
 **Merged behavior:** The API merges **`defaults`** from the project file into each **`verify_spec`** request (e.g. `tools`, `outDir`, timeouts, allowlist, retries, isolation, artifact pruning) when the JSON body omits those fields.
 
-**LLM from the UI:** The form sends a full Ollama policy when **Ollama** is selected. For **`remote`** or **`none`**, the client currently sends only `{ "provider": "…" }`, which **replaces** the file’s `llm` object for that request—so **remote credentials in `checkirai.config.json` are not used** unless you extend the UI (or call the API without overriding `llm`). Practical options: keep **Ollama** in the dashboard and use **`remote`** from the CLI/MCP with a proper `llm` payload, or add form fields / merge logic in the web client later.
+**LLM from the UI:** The **LLM** tab edits the full **`LlmPolicy`** (all four roles, shared Ollama host, auto-pull, require-tool-capable) and sends it as the **`llm`** property on **`verify_spec`**. The server parses it with **`LlmPolicySchema`** and then **`mergeLlmPolicyWithProjectProfile`**, so **`profiles`** / **`defaults.profile`** from the project file still apply on top. Run rows store a compact summary (`llm_provider`, `llm_model` pipe of role models).
+
+**RAM-aware model hints:** The **`model_catalog`** command (and the dashboard refresh that calls it) returns **`hardware`**: total system RAM on the **machine running the API** (not the browser), a suggested hardware profile key aligned with **`checkirai.config.json` → `profiles`** (`laptop_16gb` below ~18 GiB, `workstation_24gb` below ~34 GiB, else `high_end_40gb`), a short rationale, a heuristic **`maxApproxQ4RamGiBForCatalog`** used to filter the downloadable **recommended** list, and **`previewLlmPolicy`** when the suggested profile exists in the project file. MCP **`model_suggest`** also returns **`hardware`** and **`modelsMatchingRam`**.
 
 ### Development (API + Vite)
 
@@ -224,7 +262,7 @@ This runs `node --import tsx src/interfaces/mcp/bin.ts`. Optional environment:
 | `verify_spec`        | Full run: normalize/plan/execute/judge; returns structured verification result |
 | `restart_verify_spec` | New run chained to a parent: `restartFromPhase` `spec_ir` or `llm_plan`, inherits `targetUrl` / default `llm` from parent when omitted (same engine as `verify_spec` + `restartFromRunId`) |
 | `suggest_probe_plan` | Plan probes from `specMarkdown` or `spec` + tool set without executing |
-| `list_capabilities` | List capability classes for a comma-separated `tools` string (`fs`, `http`, `shell`, `playwright-mcp`, `chrome-devtools`, …) |
+| `list_capabilities` | For a comma-separated **`tools`** string, returns which verifier **capabilities** are available (e.g. `navigate`, `read_ui_structure`, `call_http`, …)—see **`src/capabilities/types.ts`** / **`ALL_CAPABILITY_NAMES`** |
 
 **Run inspection** (after you have a `runId` from `verify_spec` or the dashboard)
 
@@ -348,12 +386,12 @@ Common optional fields:
 | `targetUrl`              | Required base URL of the app under test |
 | `tools`                  | Comma-separated tool set (default `fs,http`) |
 | `outDir`                 | Output root (defaults to server’s root, usually `.verifier`) |
-| `llm`                    | Full **`LlmPolicy`**: e.g. Ollama as below, or **`remote`** with `remoteBaseUrl`, `remoteApiKey`, `remoteModel` |
+| `llm`                    | Full **`LlmPolicy`**: shared **`ollamaHost`**, **`allowAutoPull`**, **`requireToolCapable`**, plus per-role **`normalizer`**, **`plannerAssist`**, **`judge`**, **`triage`** (each: **`provider`**, **`model`**, optional **`fallbackModel`**, **`temperature`**, **`maxRetries`**, **`remoteBaseUrl`**, **`remoteApiKey`** when `provider` is **`remote`**) |
 | `chromeDevtoolsServer`   | `{ "command": "...", "args": ["..."], "cwd": "..." }` to spawn Chrome DevTools MCP for this run (CLI can also read `checkirai.config.json`) |
 | `restartFromPhase`       | `spec_ir` or `llm_plan` (not `start`) |
 | `restartFromRunId`       | Parent run UUID when restarting |
 
-**Merged from project `defaults` (not exposed as MCP `verify_spec` tool arguments today):** `maxRunMs`, `runCommandAllowlist`, `stepRetries`, `stepRetryDelayMs`, `isolateProbeSessions`, `artifactMaxRuns`. Put them in **`checkirai.config.json`** → **`defaults`** so CLI, web API, and MCP runs all pick them up. The **web** `/api/commands/verify_spec` body does not yet map these keys from JSON into `VerifySpecInput`; the shipped React UI has no fields for them—**file defaults are the supported path** for the dashboard.
+**Merged from project `defaults` (omit on the request body to use file values):** `maxRunMs`, `runCommandAllowlist`, `allowShellMetacharacters`, `stepRetries`, `stepRetryDelayMs`, `isolateProbeSessions`, `artifactMaxRuns`, `profile`. Put them in **`checkirai.config.json`** → **`defaults`** so CLI, web API, and MCP runs pick them up. The shipped dashboard focuses on spec, **tools**, Chrome MCP launch, and **LLM** policy; other **`defaults`** knobs are file-driven unless you extend the client.
 
 For a focused restart call, **`restart_verify_spec`** accepts **`parentRunId`** (same UUID), **`restartFromPhase`** (`spec_ir` \| `llm_plan`), and optional overrides; see the tool description in the MCP host.
 
@@ -365,15 +403,38 @@ For a focused restart call, **`restart_verify_spec`** accepts **`parentRunId`** 
   "specMarkdown": "- Page shows a “Sign in” button\n- Clicking it opens a dialog",
   "tools": "fs,http",
   "llm": {
-    "provider": "ollama",
     "ollamaHost": "http://127.0.0.1:11434",
-    "ollamaModel": "auto",
-    "allowAutoPull": true
+    "allowAutoPull": true,
+    "requireToolCapable": true,
+    "normalizer": {
+      "provider": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "fallbackModel": "qwen2.5:7b-instruct",
+      "temperature": 0.1,
+      "maxRetries": 3
+    },
+    "plannerAssist": {
+      "provider": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "temperature": 0.2
+    },
+    "judge": {
+      "provider": "ollama",
+      "model": "deepseek-r1:14b",
+      "fallbackModel": "qwen2.5:14b-instruct",
+      "temperature": 0,
+      "maxRetries": 2
+    },
+    "triage": {
+      "provider": "ollama",
+      "model": "deepseek-r1:14b",
+      "temperature": 0.1
+    }
   }
 }
 ```
 
-Remote policy shape (when not relying on `checkirai.config.json`):
+Remote example (judge only; other roles omitted here—merge with full defaults in real use):
 
 ```json
 {
@@ -381,10 +442,18 @@ Remote policy shape (when not relying on `checkirai.config.json`):
   "specMarkdown": "- Page loads",
   "tools": "fs,http,chrome-devtools",
   "llm": {
-    "provider": "remote",
-    "remoteBaseUrl": "https://api.openai.com/v1",
-    "remoteApiKey": "sk-…",
-    "remoteModel": "gpt-4.1-mini"
+    "ollamaHost": "http://127.0.0.1:11434",
+    "allowAutoPull": true,
+    "requireToolCapable": true,
+    "normalizer": { "provider": "ollama", "model": "qwen2.5:14b-instruct", "temperature": 0.1 },
+    "plannerAssist": { "provider": "ollama", "model": "qwen2.5:14b-instruct", "temperature": 0.2 },
+    "judge": {
+      "provider": "remote",
+      "model": "gpt-4.1-mini",
+      "remoteBaseUrl": "https://api.openai.com/v1",
+      "remoteApiKey": "sk-…"
+    },
+    "triage": { "provider": "none", "model": "disabled" }
   }
 }
 ```
@@ -414,7 +483,15 @@ Inputs are resolved to one combined markdown string, then normalized to Spec IR 
     ]
   },
   "tools": "fs,http",
-  "llm": { "provider": "ollama", "ollamaModel": "auto", "allowAutoPull": true }
+  "llm": {
+    "ollamaHost": "http://127.0.0.1:11434",
+    "allowAutoPull": true,
+    "requireToolCapable": true,
+    "normalizer": { "provider": "ollama", "model": "qwen2.5:14b-instruct", "temperature": 0.1 },
+    "plannerAssist": { "provider": "ollama", "model": "qwen2.5:14b-instruct", "temperature": 0.2 },
+    "judge": { "provider": "ollama", "model": "deepseek-r1:14b", "temperature": 0 },
+    "triage": { "provider": "ollama", "model": "deepseek-r1:14b", "temperature": 0.1 }
+  }
 }
 ```
 

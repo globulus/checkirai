@@ -55,6 +55,17 @@ export class ChromeDevtoolsMcpIntegration {
     const res = await this.client.callTool(toolName, args);
     if (res.isError) {
       const details = extractText(res);
+      // evaluate_script failures are almost always page JS (null deref, throw),
+      // not "the MCP tool is missing" — use a distinct code and surface the message.
+      if (toolName === "evaluate_script") {
+        throw new VerifierError(
+          "EVAL_SCRIPT_FAILED",
+          details.trim()
+            ? `evaluate_script failed in page: ${details.trim()}`
+            : "evaluate_script failed in page (no details).",
+          { details: { response: details } },
+        );
+      }
       throw new VerifierError(
         "TOOL_UNAVAILABLE",
         `chrome-devtools tool failed: ${toolName}`,

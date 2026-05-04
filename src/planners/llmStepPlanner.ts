@@ -1,7 +1,9 @@
 import { performance } from "node:perf_hooks";
 import { z } from "zod";
-import { ensureModelAvailable } from "../llm/modelOps.js";
-import { ollamaGenerate } from "../llm/ollamaHttp.js";
+import {
+  chatJsonForRole,
+  policyForPlannerLlmCall,
+} from "../llm/chatForRole.js";
 import type { LlmPolicy } from "../llm/types.js";
 import type { McpToolDescriptor } from "../mcp/client.js";
 import { VerifierError } from "../shared/errors.js";
@@ -51,8 +53,8 @@ export async function planStepsWithLlm(opts: {
 }> {
   const startedAt = performance.now();
 
-  // If no model, do nothing.
-  if (opts.llm.provider !== "ollama") {
+  const planPolicy = policyForPlannerLlmCall(opts.llm);
+  if (planPolicy.plannerAssist.provider === "none") {
     return {
       spec: opts.spec,
       meta: {
@@ -61,8 +63,6 @@ export async function planStepsWithLlm(opts: {
       },
     };
   }
-
-  const { selectedModel } = await ensureModelAvailable(opts.llm);
 
   const system =
     "You are an end-to-end web test planner. Produce ONLY JSON. No prose.";
@@ -108,23 +108,20 @@ export async function planStepsWithLlm(opts: {
     JSON.stringify(opts.spec, null, 2),
   ].join("\n");
 
-  let gen: Awaited<ReturnType<typeof ollamaGenerate>>;
+  let responseText: string;
+  let selectedModel: string;
   try {
-    gen = await ollamaGenerate(opts.llm.ollamaHost, {
-      model: selectedModel,
+    const out = await chatJsonForRole(planPolicy, "plannerAssist", {
       system,
       prompt,
-      format: "json",
-      stream: false,
-      options: { temperature: 0 },
     });
-  } catch (cause) {
-    // If planning fails, we should still run with whatever we have.
+    responseText = out.responseText;
+    selectedModel = out.modelUsed;
+  } catch {
     return {
       spec: opts.spec,
       meta: {
         durationMs: Math.round(performance.now() - startedAt),
-        selectedModel,
         patchedRequirements: 0,
       },
     };
@@ -132,14 +129,14 @@ export async function planStepsWithLlm(opts: {
 
   let raw: unknown;
   try {
-    raw = JSON.parse(gen.response);
+    raw = JSON.parse(responseText);
   } catch (cause) {
     throw new VerifierError(
       "LLM_PROVIDER_ERROR",
       "LLM step planner returned non-JSON.",
       {
         cause,
-        details: { responsePreview: gen.response.slice(0, 500) },
+        details: { responsePreview: responseText.slice(0, 500) },
       },
     );
   }

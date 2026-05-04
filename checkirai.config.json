@@ -6,11 +6,66 @@
     "outRoot": ".verifier"
   },
   "llm": {
-    "provider": "ollama",
     "ollamaHost": "http://127.0.0.1:11434",
-    "ollamaModel": "auto",
     "allowAutoPull": true,
-    "requireToolCapable": true
+    "requireToolCapable": true,
+    "normalizer": {
+      "provider": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "fallbackModel": "qwen2.5:7b-instruct",
+      "temperature": 0.1,
+      "maxRetries": 3
+    },
+    "plannerAssist": {
+      "provider": "ollama",
+      "model": "qwen2.5:14b-instruct",
+      "temperature": 0.2
+    },
+    "judge": {
+      "provider": "ollama",
+      "model": "deepseek-r1:14b",
+      "fallbackModel": "qwen2.5:14b-instruct",
+      "temperature": 0,
+      "maxRetries": 2,
+      "ollamaJsonFormat": false
+    },
+    "triage": {
+      "provider": "ollama",
+      "model": "deepseek-r1:14b",
+      "temperature": 0.1
+    }
+  },
+  "profiles": {
+    "laptop_16gb": {
+      "normalizer": { "model": "qwen2.5:7b-instruct" },
+      "plannerAssist": { "model": "qwen2.5:7b-instruct" },
+      "judge": {
+        "model": "qwen2.5:14b-instruct",
+        "fallbackModel": "qwen2.5:7b-instruct",
+        "ollamaJsonFormat": true
+      },
+      "triage": { "model": "qwen2.5:14b-instruct" }
+    },
+    "workstation_24gb": {
+      "normalizer": { "model": "qwen2.5:14b-instruct" },
+      "plannerAssist": { "model": "qwen2.5:14b-instruct" },
+      "judge": {
+        "model": "deepseek-r1:14b",
+        "fallbackModel": "qwen2.5:14b-instruct",
+        "ollamaJsonFormat": false
+      },
+      "triage": { "model": "deepseek-r1:14b" }
+    },
+    "high_end_40gb": {
+      "normalizer": { "model": "qwen2.5:14b-instruct" },
+      "plannerAssist": { "model": "qwen2.5:14b-instruct" },
+      "judge": {
+        "model": "qwen2.5:32b-instruct",
+        "fallbackModel": "deepseek-r1:14b",
+        "ollamaJsonFormat": true
+      },
+      "triage": { "model": "deepseek-r1:14b" }
+    }
   },
   "mcpServers": {
     "chrome-devtools": {

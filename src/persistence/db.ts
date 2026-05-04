@@ -85,6 +85,11 @@ CREATE TABLE IF NOT EXISTS requirement_artifacts (
   FOREIGN KEY (run_id, requirement_id) REFERENCES requirements(run_id, id) ON DELETE CASCADE,
   FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS schema_version (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
 `;
 
 export function openDb(dbPath: string): Db {
@@ -109,7 +114,7 @@ export function migrate(db: Db) {
     }
   }
   db.exec(sql);
-  ensureRunLineageColumns(db);
+  applySchemaMigrations(db);
 }
 
 function tableHasColumn(db: Db, table: string, column: string): boolean {
@@ -119,12 +124,28 @@ function tableHasColumn(db: Db, table: string, column: string): boolean {
   return rows.some((r) => r.name === column);
 }
 
-/** Add columns introduced after v1 schema (SQLite has no IF NOT EXISTS for columns). */
-function ensureRunLineageColumns(db: Db) {
-  if (!tableHasColumn(db, "runs", "parent_run_id")) {
-    db.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
-  }
-  if (!tableHasColumn(db, "runs", "restart_from_phase")) {
-    db.exec(`ALTER TABLE runs ADD COLUMN restart_from_phase TEXT`);
+/**
+ * Versioned migrations for existing DB files. New installs get full DDL from
+ * `schema.sql` / `EMBEDDED_SCHEMA_SQL`; older files may lack columns added after v1.
+ */
+function applySchemaMigrations(db: Db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`);
+  const row = db
+    .prepare(`SELECT MAX(version) AS v FROM schema_version`)
+    .get() as { v: number | null };
+  const v = row.v ?? 0;
+  if (v < 1) {
+    if (!tableHasColumn(db, "runs", "parent_run_id")) {
+      db.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
+    }
+    if (!tableHasColumn(db, "runs", "restart_from_phase")) {
+      db.exec(`ALTER TABLE runs ADD COLUMN restart_from_phase TEXT`);
+    }
+    db.prepare(
+      `INSERT INTO schema_version (version, applied_at) VALUES (1, @t)`,
+    ).run({ t: new Date().toISOString() });
   }
 }

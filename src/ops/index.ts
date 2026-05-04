@@ -6,12 +6,14 @@ export { createOpsContext, type OpsContext } from "./context.js";
 export { RunEventBus } from "./eventBus.js";
 export type { RunEvent, RunEventSink } from "./events.js";
 export {
+  buildLlmHardwareHint,
   modelCatalog,
   modelEnsure,
   modelList,
   modelPull,
   modelSuggest,
   ollamaStatus,
+  type LlmHardwareHint,
 } from "./modelOps.js";
 export {
   ollamaDaemonStart,

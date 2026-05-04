@@ -4,6 +4,10 @@ import pino from "pino";
 import * as z from "zod/v4";
 import { buildCapabilityGraph } from "../../capabilities/registry.js";
 import { VerificationResultSchema } from "../../core/result.js";
+import {
+  loadProjectConfig,
+  mergeLlmPolicyWithProjectProfile,
+} from "../../config/projectConfig.js";
 import { LlmPolicySchema } from "../../llm/types.js";
 import {
   createOpsContext,
@@ -33,6 +37,7 @@ const logger = pino({ name: "checkirai-mcp" }, pino.destination(2));
 export async function startMcpServer(opts?: { outDir?: string }) {
   const outRoot = opts?.outDir ?? ".verifier";
   const ctx = createOpsContext({ outRoot });
+  const projectCfg = loadProjectConfig();
 
   const server = new McpServer(
     { name: "checkirai", version: "0.1.0" },
@@ -137,12 +142,31 @@ export async function startMcpServer(opts?: { outDir?: string }) {
     "model_suggest",
     {
       description:
-        "Suggest recommended models for tool-driving structured output.",
+        "Suggest recommended models for tool-driving structured output. Includes host RAM-based profile hint and a RAM-filtered shortlist (see `hardware`, `modelsMatchingRam`).",
       inputSchema: { requireTooling: z.boolean().optional() },
       outputSchema: {
         models: z.array(
           z.object({ name: z.string(), notes: z.string().optional() }),
         ),
+        modelsMatchingRam: z
+          .array(
+            z.object({
+              name: z.string(),
+              notes: z.string().optional(),
+              approxQ4RamGiB: z.number().optional(),
+            }),
+          )
+          .optional(),
+        hardware: z
+          .object({
+            totalMemGiB: z.number(),
+            totalMemBytes: z.number(),
+            suggestedProfileKey: z.string(),
+            profileExistsInProject: z.boolean(),
+            rationale: z.string(),
+            maxApproxQ4RamGiBForCatalog: z.number(),
+          })
+          .optional(),
       },
     },
     async ({ requireTooling }) => {
@@ -193,7 +217,10 @@ export async function startMcpServer(opts?: { outDir?: string }) {
     },
     async ({ llm }) => {
       const out = await modelEnsure(ctx, {
-        llm: LlmPolicySchema.parse(llm ?? { provider: "ollama" }),
+        llm: mergeLlmPolicyWithProjectProfile(
+          LlmPolicySchema.parse(llm ?? {}),
+          projectCfg.config ?? undefined,
+        ),
       });
       return {
         content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
@@ -215,7 +242,10 @@ export async function startMcpServer(opts?: { outDir?: string }) {
       outputSchema: ProbePlanSchema,
     },
     async ({ specMarkdown, spec, tools, llm }) => {
-      const llmPolicy = LlmPolicySchema.parse(llm ?? { provider: "ollama" });
+      const llmPolicy = mergeLlmPolicyWithProjectProfile(
+        LlmPolicySchema.parse(llm ?? {}),
+        projectCfg.config ?? undefined,
+      );
       const specIr = specMarkdown
         ? await normalizeMarkdownToSpecIRWithLlm(specMarkdown, llmPolicy)
         : SpecIRSchema.parse(spec ?? {});
@@ -300,20 +330,10 @@ export async function startMcpServer(opts?: { outDir?: string }) {
           "Parent run has no target_base_url; pass targetUrl explicitly.",
         );
       }
-      const llmPolicy = llm
-        ? LlmPolicySchema.parse(llm)
-        : LlmPolicySchema.parse({
-            provider:
-              parent.llm_provider === "remote" ||
-              parent.llm_provider === "none" ||
-              parent.llm_provider === "ollama"
-                ? parent.llm_provider
-                : "ollama",
-            ollamaModel:
-              parent.llm_provider === "ollama" && parent.llm_model
-                ? parent.llm_model
-                : "auto",
-          });
+      const llmPolicy = mergeLlmPolicyWithProjectProfile(
+        LlmPolicySchema.parse(llm ?? {}),
+        projectCfg.config ?? undefined,
+      );
 
       const verifyInput = {
         targetUrl: effectiveTarget,
@@ -389,7 +409,10 @@ export async function startMcpServer(opts?: { outDir?: string }) {
         ? undefined
         : SpecIRSchema.parse(spec ?? {});
 
-      const llmPolicy = LlmPolicySchema.parse(llm ?? { provider: "ollama" });
+      const llmPolicy = mergeLlmPolicyWithProjectProfile(
+        LlmPolicySchema.parse(llm ?? {}),
+        projectCfg.config ?? undefined,
+      );
 
       const verifyInput = {
         targetUrl,

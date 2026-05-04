@@ -5,6 +5,15 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { ALL_CAPABILITY_NAMES } from "../../src/capabilities/types.js";
+import {
+  type LlmPolicy,
+  LlmPolicySchema,
+  type LlmRole,
+  type LlmRoleConfig,
+  type LlmRoleProvider,
+  summarizeLlmPolicyForRun,
+} from "../../src/llm/types.js";
 import {
   command,
   getChromeDevtoolsMcpConfig,
@@ -16,6 +25,26 @@ import {
   type RunRow,
   subscribeRunEvents,
 } from "./api";
+
+const LLM_ROLES: LlmRole[] = ["normalizer", "plannerAssist", "judge", "triage"];
+
+const ROLE_LABELS: Record<LlmRole, string> = {
+  normalizer: "Normalizer",
+  plannerAssist: "Planner assist",
+  judge: "Judge",
+  triage: "Triage",
+};
+
+function patchLlmRole(
+  policy: LlmPolicy,
+  role: LlmRole,
+  patch: Partial<LlmRoleConfig>,
+): LlmPolicy {
+  return {
+    ...policy,
+    [role]: { ...policy[role], ...patch },
+  };
+}
 
 function fmt(ts?: string | null) {
   if (!ts) return "";
@@ -34,6 +63,22 @@ function safeJson(v: unknown) {
   }
 }
 
+function formatLiveStepLabel(e: RunEvent): string | null {
+  if (e.type === "step_started") {
+    const cap =
+      typeof e.capability === "string" ? e.capability : String(e.capability);
+    const act = typeof e.action === "string" ? e.action : String(e.action);
+    return `${cap} › ${act}`;
+  }
+  if (e.type === "probe_started") {
+    const pid =
+      typeof e.probeId === "string" ? e.probeId.slice(0, 8) : "probe";
+    return `Probe ${pid}…`;
+  }
+  if (e.type === "run_started") return "Starting verification…";
+  return null;
+}
+
 export function App() {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -43,7 +88,7 @@ export function App() {
   >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"general" | "mcp" | "ollama">("general");
+  const [view, setView] = useState<"general" | "mcp" | "llm">("general");
   const [inputSpecIrByRunId, setInputSpecIrByRunId] = useState<
     Record<string, unknown>
   >({});
@@ -69,7 +114,20 @@ export function App() {
   type ModelCatalog = {
     ollama?: { ok?: boolean; version?: string };
     installed?: Array<{ name?: unknown }>;
-    recommended?: Array<{ name?: string; notes?: string }>;
+    recommended?: Array<{
+      name?: string;
+      notes?: string;
+      approxQ4RamGiB?: number;
+    }>;
+    hardware?: {
+      totalMemBytes: number;
+      totalMemGiB: number;
+      suggestedProfileKey: string;
+      profileExistsInProject: boolean;
+      rationale: string;
+      maxApproxQ4RamGiBForCatalog: number;
+      previewLlmPolicy?: LlmPolicy;
+    };
   };
   const [modelCatalog, setModelCatalog] = useState<ModelCatalog | null>(null);
 
@@ -82,9 +140,16 @@ export function App() {
   const [specMarkdown, setSpecMarkdown] = useState(
     "- The page has a “Sign in” button",
   );
-  const [llmProvider, setLlmProvider] = useState("ollama");
-  const [ollamaHost, setOllamaHost] = useState("http://127.0.0.1:11434");
-  const [ollamaModel, setOllamaModel] = useState("auto");
+  const [llmPolicy, setLlmPolicy] = useState<LlmPolicy>(() =>
+    LlmPolicySchema.parse({}),
+  );
+  /** `defaults.profile` from loaded project config (server merges profile over policy). */
+  const [projectFileProfile, setProjectFileProfile] = useState<string | null>(
+    null,
+  );
+  const [projectProfileNames, setProjectProfileNames] = useState<string[]>([]);
+  /** Which role receives "Use for verify" from the model catalog. */
+  const [modelAssignRole, setModelAssignRole] = useState<LlmRole>("judge");
   const [specDropActive, setSpecDropActive] = useState(false);
   const [lastResponse, setLastResponse] = useState<{
     title: string;
@@ -105,6 +170,10 @@ export function App() {
   };
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  /** Sub-label while status is running (from SSE): current step or "Continuing…". */
+  const [runLiveCaptionById, setRunLiveCaptionById] = useState<
+    Record<string, string>
+  >({});
 
   const log = useCallback(
     (item: Omit<TimelineItem, "ts"> & { ts?: string }) => {
@@ -121,6 +190,16 @@ export function App() {
     () => runs.find((r) => r.id === selectedRunId) ?? null,
     [runs, selectedRunId],
   );
+
+  useEffect(() => {
+    if (!selectedRun || selectedRun.status === "running") return;
+    setRunLiveCaptionById((prev) => {
+      if (!prev[selectedRun.id]) return prev;
+      const next = { ...prev };
+      delete next[selectedRun.id];
+      return next;
+    });
+  }, [selectedRun?.id, selectedRun?.status]);
 
   const wantsChromeDevtools = useMemo(
     () =>
@@ -160,16 +239,33 @@ export function App() {
           if (typeof d.targetUrl === "string") setTargetUrl(d.targetUrl);
           if (typeof d.tools === "string") setTools(d.tools);
         }
-        const llm =
+        const rawLlm =
           cfg && typeof cfg === "object" && "llm" in cfg
             ? (cfg as { llm?: unknown }).llm
-            : null;
-        if (llm && typeof llm === "object") {
-          const p = llm as Record<string, unknown>;
-          if (typeof p.provider === "string") setLlmProvider(p.provider);
-          if (typeof p.ollamaHost === "string") setOllamaHost(p.ollamaHost);
-          if (typeof p.ollamaModel === "string") setOllamaModel(p.ollamaModel);
+            : undefined;
+        if (rawLlm !== undefined) {
+          const parsed = LlmPolicySchema.safeParse(rawLlm);
+          if (parsed.success) setLlmPolicy(parsed.data);
         }
+        if (cfg && typeof cfg === "object" && "profiles" in cfg) {
+          const pr = (cfg as { profiles?: unknown }).profiles;
+          if (pr && typeof pr === "object" && !Array.isArray(pr)) {
+            setProjectProfileNames(Object.keys(pr as Record<string, unknown>));
+          } else {
+            setProjectProfileNames([]);
+          }
+        } else {
+          setProjectProfileNames([]);
+        }
+        const defProfile =
+          defaults && typeof defaults === "object" && "profile" in defaults
+            ? (defaults as { profile?: unknown }).profile
+            : null;
+        setProjectFileProfile(
+          typeof defProfile === "string" && defProfile.trim()
+            ? defProfile.trim()
+            : null,
+        );
       })
       .catch(() => {});
     // Run once on mount; config is static in practice.
@@ -196,6 +292,11 @@ export function App() {
     let unsub = () => {};
 
     setEvents([]);
+    setRunLiveCaptionById((prev) => {
+      const next = { ...prev };
+      delete next[selectedRunId];
+      return next;
+    });
     log({
       level: "info",
       title: `Selected run ${selectedRunId}`,
@@ -220,6 +321,35 @@ export function App() {
         runId: selectedRunId,
         ts: receivedAt,
       });
+
+      const rid =
+        e && typeof e === "object" && typeof (e as RunEvent).runId === "string"
+          ? (e as RunEvent).runId
+          : selectedRunId;
+
+      if (
+        e?.type === "step_started" ||
+        e?.type === "probe_started" ||
+        e?.type === "run_started"
+      ) {
+        const label = formatLiveStepLabel(e as RunEvent);
+        if (label && rid)
+          setRunLiveCaptionById((prev) => ({ ...prev, [rid]: label }));
+      } else if (e?.type === "step_finished" && rid) {
+        setRunLiveCaptionById((prev) => ({
+          ...prev,
+          [rid]: "Continuing…",
+        }));
+      } else if (
+        (e?.type === "run_finished" || e?.type === "run_error") &&
+        rid
+      ) {
+        setRunLiveCaptionById((prev) => {
+          const next = { ...prev };
+          delete next[rid];
+          return next;
+        });
+      }
 
       // Backend is the source of truth for spec IR; it publishes it on run start.
       if (e?.type === "run_started") {
@@ -289,11 +419,23 @@ export function App() {
 
   const refreshModelCatalog = useCallback(async () => {
     const out = await command("model_catalog", {
-      host: ollamaHost,
+      host: llmPolicy.ollamaHost,
       requireTooling: true,
     });
     setModelCatalog(out as ModelCatalog);
-  }, [ollamaHost]);
+  }, [llmPolicy.ollamaHost]);
+
+  const updateLlmRole = useCallback(
+    (role: LlmRole, patch: Partial<LlmRoleConfig>) => {
+      setLlmPolicy((p) => patchLlmRole(p, role, patch));
+    },
+    [],
+  );
+
+  const llmRunSummary = useMemo(
+    () => summarizeLlmPolicyForRun(llmPolicy),
+    [llmPolicy],
+  );
 
   useEffect(() => {
     refreshModelCatalog().catch(() => {});
@@ -306,10 +448,19 @@ export function App() {
     const recommended = (modelCatalog?.recommended ?? [])
       .map((m) => (typeof m?.name === "string" ? m.name : null))
       .filter(Boolean) as string[];
-    const all = Array.from(new Set(["auto", ...installed, ...recommended]));
-    if (ollamaModel && !all.includes(ollamaModel)) all.push(ollamaModel);
-    return all;
-  }, [modelCatalog, ollamaModel]);
+    const fromPolicy = new Set<string>();
+    for (const role of LLM_ROLES) {
+      const rc = llmPolicy[role];
+      if (rc.provider !== "ollama") continue;
+      if (rc.model.trim()) fromPolicy.add(rc.model.trim());
+      if (rc.fallbackModel?.trim()) fromPolicy.add(rc.fallbackModel.trim());
+    }
+    const all = Array.from(
+      new Set([...installed, ...recommended, ...fromPolicy]),
+    );
+    if (all.length === 0) all.push("qwen2.5:14b-instruct");
+    return all.sort((a, b) => a.localeCompare(b));
+  }, [modelCatalog, llmPolicy]);
 
   const respond = useCallback((title: string, body: unknown) => {
     setLastResponse({ title, body, ts: new Date().toISOString() });
@@ -329,9 +480,7 @@ export function App() {
       body: {
         targetUrl,
         tools,
-        llmProvider,
-        ollamaHost: llmProvider === "ollama" ? ollamaHost : undefined,
-        ollamaModel: llmProvider === "ollama" ? ollamaModel : undefined,
+        llm: llmRunSummary,
       },
       source: "client",
       runId: selectedRunId,
@@ -349,15 +498,7 @@ export function App() {
         });
         return;
       }
-      const llm =
-        llmProvider === "ollama"
-          ? {
-              provider: "ollama",
-              ollamaHost,
-              ollamaModel,
-              allowAutoPull: true,
-            }
-          : { provider: llmProvider };
+      const llm = LlmPolicySchema.parse(llmPolicy);
       const startedAt = performance.now();
       log({
         level: "info",
@@ -461,15 +602,7 @@ export function App() {
         return;
       }
 
-      const llm =
-        llmProvider === "ollama"
-          ? {
-              provider: "ollama",
-              ollamaHost,
-              ollamaModel,
-              allowAutoPull: true,
-            }
-          : { provider: llmProvider };
+      const llm = LlmPolicySchema.parse(llmPolicy);
 
       const startedAt = performance.now();
       log({
@@ -576,11 +709,11 @@ export function App() {
           <button
             type="button"
             role="tab"
-            aria-selected={view === "ollama"}
-            className={`tab ${view === "ollama" ? "tabActive" : ""}`}
-            onClick={() => setView("ollama")}
+            aria-selected={view === "llm"}
+            className={`tab ${view === "llm" ? "tabActive" : ""}`}
+            onClick={() => setView("llm")}
           >
-            Ollama
+            LLM
           </button>
         </div>
 
@@ -617,6 +750,10 @@ export function App() {
               value={tools}
               onChange={(e) => setTools(e.target.value)}
             />
+            <div className="muted" style={{ marginTop: 4, lineHeight: 1.45 }}>
+              Tool tokens enable integrations; verifier capabilities include:{" "}
+              <span className="mono">{ALL_CAPABILITY_NAMES.join(", ")}</span>.
+            </div>
 
             {wantsChromeDevtools ? (
               <div className="muted">
@@ -695,33 +832,45 @@ export function App() {
               onChange={(e) => setSpecMarkdown(e.target.value)}
             />
 
-            <label className="muted" htmlFor="llmProvider">
-              LLM provider
-            </label>
-            <select
-              id="llmProvider"
-              className="select"
-              value={llmProvider}
-              onChange={(e) => setLlmProvider(e.target.value)}
-            >
-              <option value="ollama">ollama</option>
-              <option value="none">none</option>
-              <option value="remote">remote</option>
-            </select>
-
-            {llmProvider === "ollama" ? (
-              <div className="muted">
-                Configure host/model in the{" "}
+            <div className="muted" style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                LLM policy (per role)
+              </div>
+              <div
+                className="mono"
+                style={{ fontSize: 12, wordBreak: "break-all" }}
+              >
+                {llmRunSummary.llm_provider ?? "—"} ·{" "}
+                {llmRunSummary.llm_model ?? "—"}
+              </div>
+              <div style={{ marginTop: 6 }}>
+                Edit roles, models, and Ollama host in the{" "}
                 <button
                   type="button"
                   className="linkBtn"
-                  onClick={() => setView("ollama")}
+                  onClick={() => setView("llm")}
                 >
-                  Ollama tab
+                  LLM tab
                 </button>
+                . The server still merges <code className="mono">profiles</code>{" "}
+                from <code className="mono">checkirai.config.json</code> when{" "}
+                <code className="mono">defaults.profile</code> is set
+                {projectFileProfile ? (
+                  <>
+                    {" "}
+                    (current file:{" "}
+                    <span className="mono">{projectFileProfile}</span>)
+                  </>
+                ) : null}
                 .
               </div>
-            ) : null}
+              {projectProfileNames.length ? (
+                <div style={{ marginTop: 4 }}>
+                  Profiles in project file:{" "}
+                  <span className="mono">{projectProfileNames.join(", ")}</span>
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -778,44 +927,228 @@ export function App() {
           </div>
         ) : null}
 
-        {view === "ollama" ? (
+        {view === "llm" ? (
           <div className="card col" style={{ marginBottom: 12 }}>
-            <div style={{ fontWeight: 650 }}>Ollama</div>
+            <div style={{ fontWeight: 650 }}>LLM policy</div>
+            <div className="muted" style={{ marginBottom: 10 }}>
+              Per-role providers and models (matches{" "}
+              <code className="mono">checkirai.config.json</code> ·{" "}
+              <code className="mono">LlmPolicy</code>). Sent on each verify; the
+              API merges hardware <code className="mono">profiles</code> from
+              the project file when{" "}
+              <code className="mono">defaults.profile</code> is set.
+            </div>
 
             <label className="muted" htmlFor="ollamaHost">
-              Host
+              Ollama host
             </label>
             <input
               id="ollamaHost"
               className="input"
-              value={ollamaHost}
-              onChange={(e) => setOllamaHost(e.target.value)}
+              value={llmPolicy.ollamaHost}
+              onChange={(e) =>
+                setLlmPolicy((p) => ({ ...p, ollamaHost: e.target.value }))
+              }
             />
 
-            <label className="muted" htmlFor="ollamaModel">
-              Model
+            <label className="row" style={{ marginTop: 8, gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={llmPolicy.allowAutoPull}
+                onChange={(e) =>
+                  setLlmPolicy((p) => ({
+                    ...p,
+                    allowAutoPull: e.target.checked,
+                  }))
+                }
+              />
+              <span className="muted">Allow auto-pull (Ollama)</span>
             </label>
-            <select
-              id="ollamaModel"
-              className="select"
-              value={ollamaModel}
-              onChange={(e) => setOllamaModel(e.target.value)}
-            >
-              {availableOllamaModels.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
+            <label className="row" style={{ marginTop: 4, gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={llmPolicy.requireToolCapable}
+                onChange={(e) =>
+                  setLlmPolicy((p) => ({
+                    ...p,
+                    requireToolCapable: e.target.checked,
+                  }))
+                }
+              />
+              <span className="muted">
+                Require tool-capable models (catalog)
+              </span>
+            </label>
 
-            <div className="muted">
-              Status:{" "}
+            <div className="muted" style={{ marginTop: 10 }}>
+              Ollama:{" "}
               <span className="mono">
                 {modelCatalog?.ollama?.ok
                   ? `ok (v${modelCatalog?.ollama?.version ?? "?"})`
                   : "not running"}
               </span>
             </div>
+
+            {LLM_ROLES.map((role) => {
+              const rc = llmPolicy[role];
+              return (
+                <div
+                  key={role}
+                  className="col"
+                  style={{
+                    marginTop: 12,
+                    paddingTop: 10,
+                    borderTop: "1px solid #334155",
+                  }}
+                >
+                  <div style={{ fontWeight: 650, marginBottom: 6 }}>
+                    {ROLE_LABELS[role]}
+                  </div>
+                  <label className="muted" htmlFor={`${role}-provider`}>
+                    Provider
+                  </label>
+                  <select
+                    id={`${role}-provider`}
+                    className="select"
+                    value={rc.provider}
+                    onChange={(e) =>
+                      updateLlmRole(role, {
+                        provider: e.target.value as LlmRoleProvider,
+                      })
+                    }
+                  >
+                    <option value="ollama">ollama</option>
+                    <option value="remote">remote</option>
+                    <option value="none">none</option>
+                  </select>
+
+                  {rc.provider === "remote" ? (
+                    <>
+                      <label className="muted" htmlFor={`${role}-remoteUrl`}>
+                        Remote base URL
+                      </label>
+                      <input
+                        id={`${role}-remoteUrl`}
+                        className="input"
+                        placeholder="https://api.example.com/v1"
+                        value={rc.remoteBaseUrl ?? ""}
+                        onChange={(e) =>
+                          updateLlmRole(role, {
+                            remoteBaseUrl: e.target.value || undefined,
+                          })
+                        }
+                      />
+                    </>
+                  ) : null}
+
+                  <label className="muted" htmlFor={`${role}-model`}>
+                    Model
+                  </label>
+                  {rc.provider === "ollama" ? (
+                    <select
+                      id={`${role}-model`}
+                      className="select"
+                      value={rc.model}
+                      onChange={(e) =>
+                        updateLlmRole(role, { model: e.target.value })
+                      }
+                    >
+                      {availableOllamaModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  ) : rc.provider === "none" ? (
+                    <input
+                      id={`${role}-model`}
+                      className="input mono"
+                      value={rc.model}
+                      onChange={(e) =>
+                        updateLlmRole(role, { model: e.target.value })
+                      }
+                    />
+                  ) : (
+                    <input
+                      id={`${role}-model`}
+                      className="input mono"
+                      value={rc.model}
+                      onChange={(e) =>
+                        updateLlmRole(role, { model: e.target.value })
+                      }
+                    />
+                  )}
+
+                  {rc.provider === "ollama" ? (
+                    <>
+                      <label className="muted" htmlFor={`${role}-fb`}>
+                        Fallback model (optional)
+                      </label>
+                      <select
+                        id={`${role}-fb`}
+                        className="select"
+                        value={rc.fallbackModel ?? ""}
+                        onChange={(e) =>
+                          updateLlmRole(role, {
+                            fallbackModel: e.target.value.trim()
+                              ? e.target.value.trim()
+                              : undefined,
+                          })
+                        }
+                      >
+                        <option value="">(none)</option>
+                        {availableOllamaModels.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+
+                  <label className="muted" htmlFor={`${role}-temp`}>
+                    Temperature
+                  </label>
+                  <input
+                    id={`${role}-temp`}
+                    className="input"
+                    type="number"
+                    step="0.1"
+                    value={rc.temperature ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      updateLlmRole(
+                        role,
+                        v === ""
+                          ? { temperature: undefined }
+                          : { temperature: Number(v) },
+                      );
+                    }}
+                  />
+
+                  <label className="muted" htmlFor={`${role}-retries`}>
+                    Max retries (optional)
+                  </label>
+                  <input
+                    id={`${role}-retries`}
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={rc.maxRetries ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      updateLlmRole(
+                        role,
+                        v === ""
+                          ? { maxRetries: undefined }
+                          : { maxRetries: Math.max(0, Math.floor(Number(v))) },
+                      );
+                    }}
+                  />
+                </div>
+              );
+            })}
           </div>
         ) : null}
 
@@ -886,8 +1219,20 @@ export function App() {
           </div>
           {selectedRun ? (
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
-              <span className="badge">
+              <span
+                className="badge"
+                title={
+                  selectedRun.status === "running" &&
+                  runLiveCaptionById[selectedRun.id]
+                    ? runLiveCaptionById[selectedRun.id]
+                    : undefined
+                }
+              >
                 {selectedRun.status ?? "unknown"}
+                {selectedRun.status === "running" &&
+                runLiveCaptionById[selectedRun.id]
+                  ? ` · ${runLiveCaptionById[selectedRun.id]}`
+                  : ""}
                 {typeof selectedRun.confidence === "number"
                   ? ` • conf ${selectedRun.confidence.toFixed(2)}`
                   : ""}
@@ -896,6 +1241,19 @@ export function App() {
                 <span className="badge" title="Restart lineage">
                   from {selectedRun.parent_run_id.slice(0, 8)} •{" "}
                   {selectedRun.restart_from_phase ?? "start"}
+                </span>
+              ) : null}
+              {selectedRun.llm_model ? (
+                <span
+                  className="badge mono"
+                  title={`LLM: ${selectedRun.llm_provider ?? ""}`}
+                  style={{
+                    maxWidth: 360,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {selectedRun.llm_model}
                 </span>
               ) : null}
             </div>
@@ -1133,7 +1491,7 @@ export function App() {
                 });
                 try {
                   const out = await command("ollama_status", {
-                    host: ollamaHost,
+                    host: llmPolicy.ollamaHost,
                   });
                   respond("ollama_status", out);
                   log({
@@ -1212,7 +1570,7 @@ export function App() {
                 });
                 try {
                   const out = await command("ollama_daemon_start", {
-                    host: ollamaHost,
+                    host: llmPolicy.ollamaHost,
                   });
                   await refreshModelCatalog();
                   respond("ollama_daemon_start", out);
@@ -1284,7 +1642,7 @@ export function App() {
 
         <div className="card" style={{ marginTop: 12 }}>
           <div className="row" style={{ justifyContent: "space-between" }}>
-            <div style={{ fontWeight: 650 }}>Ollama models</div>
+            <div style={{ fontWeight: 650 }}>Model catalog</div>
             <button
               type="button"
               className="btn"
@@ -1317,6 +1675,86 @@ export function App() {
             </span>
           </div>
 
+          {modelCatalog?.hardware ? (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 10,
+                background: "#1e293b",
+                borderRadius: 6,
+                lineHeight: 1.45,
+              }}
+            >
+              <div style={{ fontWeight: 650, marginBottom: 6 }}>
+                Host RAM (API machine)
+              </div>
+              <div className="muted">
+                ~<span className="mono">{modelCatalog.hardware.totalMemGiB}</span>{" "}
+                GiB total system memory · suggested{" "}
+                <code className="mono">profiles.{modelCatalog.hardware.suggestedProfileKey}</code>
+                {!modelCatalog.hardware.profileExistsInProject ? (
+                  <span>
+                    {" "}
+                    (not defined in your project file — add it from the sample
+                    config to enable one-click merge)
+                  </span>
+                ) : null}
+              </div>
+              <div className="muted" style={{ marginTop: 6 }}>
+                {modelCatalog.hardware.rationale}
+              </div>
+              <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                Pull list below is filtered to models with approximate Q4 footprint
+                ≤{" "}
+                <span className="mono">
+                  {modelCatalog.hardware.maxApproxQ4RamGiBForCatalog}
+                </span>{" "}
+                GiB (heuristic for one large model + overhead; see implementation
+                plan).
+              </div>
+              {modelCatalog.hardware.profileExistsInProject &&
+              modelCatalog.hardware.previewLlmPolicy ? (
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ marginTop: 10 }}
+                  disabled={busy}
+                  onClick={() =>
+                    setLlmPolicy(
+                      LlmPolicySchema.parse(
+                        modelCatalog.hardware.previewLlmPolicy,
+                      ),
+                    )
+                  }
+                >
+                  Apply suggested profile to LLM form
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div
+            className="row"
+            style={{ marginTop: 12, gap: 12, flexWrap: "wrap" }}
+          >
+            <label className="muted" htmlFor="modelAssignRole">
+              “Use for verify” sets model for role
+            </label>
+            <select
+              id="modelAssignRole"
+              className="select"
+              style={{ minWidth: 160 }}
+              value={modelAssignRole}
+              onChange={(e) => setModelAssignRole(e.target.value as LlmRole)}
+            >
+              {LLM_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {ROLE_LABELS[r]}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="split" style={{ marginTop: 12 }}>
             <div className="col">
               <div style={{ fontWeight: 650 }}>Installed</div>
@@ -1328,7 +1766,7 @@ export function App() {
             </div>
             <div className="col">
               <div style={{ fontWeight: 650, marginBottom: 8 }}>
-                Recommended (downloadable)
+                Recommended for this host (RAM-aware)
               </div>
               <div className="list">
                 {(modelCatalog?.recommended ?? []).map((m) => {
@@ -1346,7 +1784,12 @@ export function App() {
                           {installed ? "installed" : "not installed"}
                         </span>
                       </div>
-                      <div className="muted">{m.notes ?? ""}</div>
+                      <div className="muted">
+                        {m.notes ?? ""}
+                        {typeof m.approxQ4RamGiB === "number"
+                          ? ` · ~${m.approxQ4RamGiB} GiB Q4 (approx.)`
+                          : ""}
+                      </div>
                       <div className="row" style={{ marginTop: 8 }}>
                         <button
                           type="button"
@@ -1357,7 +1800,7 @@ export function App() {
                             setError(null);
                             try {
                               await command("model_pull", {
-                                host: ollamaHost,
+                                host: llmPolicy.ollamaHost,
                                 modelName: m.name ?? "",
                               });
                               await refreshModelCatalog();
@@ -1379,7 +1822,11 @@ export function App() {
                           type="button"
                           className="btn"
                           disabled={busy}
-                          onClick={() => setOllamaModel(m.name ?? "")}
+                          onClick={() =>
+                            updateLlmRole(modelAssignRole, {
+                              model: m.name ?? "",
+                            })
+                          }
                         >
                           Use for verify
                         </button>

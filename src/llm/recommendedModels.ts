@@ -4,7 +4,8 @@ import type { RecommendedModel } from "./types.js";
  * Curated shortlist of models that tend to work well for structured outputs
  * (planning probes, JSON diffs, repair hints) under Ollama.
  *
- * This is intentionally small for MVP; it can expand over time or become configurable.
+ * `approxQ4RamGiB` follows the order-of-magnitude table in
+ * `checkirai_llm_implementation_plan.md` (Q4 footprint, not exact).
  */
 export const RECOMMENDED_OLLAMA_MODELS: RecommendedModel[] = [
   {
@@ -15,6 +16,7 @@ export const RECOMMENDED_OLLAMA_MODELS: RecommendedModel[] = [
       minContextTokensHint: 8192,
       speedTier: "balanced",
     },
+    approxQ4RamGiB: 12,
     notes: "Strong structured output; preferred default if available.",
   },
   {
@@ -25,7 +27,8 @@ export const RECOMMENDED_OLLAMA_MODELS: RecommendedModel[] = [
       minContextTokensHint: 8192,
       speedTier: "balanced",
     },
-    notes: "Older but reliable structured output fallback.",
+    approxQ4RamGiB: 5,
+    notes: "Fast normalization fallback; weaker on complex JSON.",
   },
   {
     name: "llama3.1:8b-instruct",
@@ -35,6 +38,7 @@ export const RECOMMENDED_OLLAMA_MODELS: RecommendedModel[] = [
       minContextTokensHint: 8192,
       speedTier: "balanced",
     },
+    approxQ4RamGiB: 6,
     notes: "Solid general-purpose instruction model.",
   },
   {
@@ -45,6 +49,29 @@ export const RECOMMENDED_OLLAMA_MODELS: RecommendedModel[] = [
       minContextTokensHint: 8192,
       speedTier: "slow",
     },
-    notes: "Higher quality; slower/heavier.",
+    approxQ4RamGiB: 9,
+    notes: "Higher quality normalization / planner assist; heavier.",
+  },
+  {
+    name: "deepseek-r1:14b",
+    provider: "ollama",
+    capability: {
+      supportsJsonWell: true,
+      minContextTokensHint: 8192,
+      speedTier: "slow",
+    },
+    approxQ4RamGiB: 16,
+    notes: "Chain-of-thought; strong judge/triage (needs ~16 GiB model RAM).",
+  },
+  {
+    name: "qwen2.5:32b-instruct",
+    provider: "ollama",
+    capability: {
+      supportsJsonWell: true,
+      minContextTokensHint: 8192,
+      speedTier: "slow",
+    },
+    approxQ4RamGiB: 20,
+    notes: "High-accuracy judgment when RAM allows (24 GiB+ class machines).",
   },
 ];

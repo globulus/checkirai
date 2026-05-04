@@ -88,6 +88,18 @@ function schemaObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * Detects common planner mistakes: `querySelector(...).innerText` throws when the
+ * node is missing. Prefer `?.`, explicit null checks, or `document.body.innerText`.
+ */
+export function hasUnsafeDomNullDerefInEvaluateScript(
+  functionSource: string,
+): boolean {
+  const re =
+    /(?:querySelector(?:All)?|getElementById)\s*\([^)]*\)\s*\.(?:innerText|textContent|innerHTML)\b/;
+  return re.test(functionSource);
+}
+
+/**
  * Minimal JSON-schema-ish validator that covers the MCP schemas we see in practice:
  * - type: object
  * - properties + required
@@ -186,6 +198,21 @@ export function validatePlan(
         message: res.message ?? "Invalid args",
         details: res.details,
       });
+    }
+
+    if (c.tool === "evaluate_script") {
+      const fn = (c.args as Record<string, unknown> | undefined)?.function;
+      if (
+        typeof fn === "string" &&
+        hasUnsafeDomNullDerefInEvaluateScript(fn)
+      ) {
+        issues.push({
+          kind: "invalid_args",
+          tool: c.tool,
+          message:
+            "evaluate_script must not dereference querySelector/getElementById without optional chaining or a null check before .innerText/.textContent/.innerHTML",
+        });
+      }
     }
   }
 

@@ -78,3 +78,8 @@ CREATE TABLE IF NOT EXISTS requirement_artifacts (
   FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS schema_version (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+

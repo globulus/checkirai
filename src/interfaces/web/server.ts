@@ -6,8 +6,11 @@ import { extname, join } from "node:path";
 import { URL } from "node:url";
 import pino from "pino";
 import { buildCapabilityGraph } from "../../capabilities/registry.js";
-import { loadProjectConfig } from "../../config/projectConfig.js";
-import { LlmPolicySchema } from "../../llm/types.js";
+import {
+  loadProjectConfig,
+  mergeLlmPolicyWithProjectProfile,
+} from "../../config/projectConfig.js";
+import { LlmPolicySchema, summarizeLlmPolicyForRun } from "../../llm/types.js";
 import {
   chromeDevtoolsListTools,
   chromeDevtoolsSelfCheck,
@@ -307,12 +310,11 @@ export function startWebDashboardServer(opts?: {
 
         if (name === "verify_spec") {
           const runId = randomUUID();
-          const llmPolicy = LlmPolicySchema.parse(
-            body.llm ??
-              projectCfg.config?.llm ?? {
-                provider: "ollama",
-              },
+          const llmPolicy = mergeLlmPolicyWithProjectProfile(
+            LlmPolicySchema.parse(body.llm ?? projectCfg.config?.llm ?? {}),
+            projectCfg.config ?? undefined,
           );
+          const llmRow = summarizeLlmPolicyForRun(llmPolicy);
           // Insert the run row immediately so the client can fetch it even while
           // long-running work (spec normalization / planning / execution) is happening.
           insertRunIfMissing(ctx.db, {
@@ -320,9 +322,8 @@ export function startWebDashboardServer(opts?: {
             created_at: new Date().toISOString(),
             target_base_url: String(body.targetUrl ?? ""),
             policy_name: null,
-            llm_provider: llmPolicy.provider,
-            llm_model:
-              llmPolicy.provider === "ollama" ? llmPolicy.ollamaModel : null,
+            llm_provider: llmRow.llm_provider,
+            llm_model: llmRow.llm_model,
             status: "running",
             confidence: null,
             summary_md_path: null,
@@ -340,7 +341,14 @@ export function startWebDashboardServer(opts?: {
                 ? { tools: projectCfg.config.defaults.tools }
                 : {}),
             ...(typeof body.outDir === "string" ? { outDir: body.outDir } : {}),
-            ...(body.llm ? { llm: LlmPolicySchema.parse(body.llm) } : {}),
+            ...(body.llm
+              ? {
+                  llm: mergeLlmPolicyWithProjectProfile(
+                    LlmPolicySchema.parse(body.llm),
+                    projectCfg.config ?? undefined,
+                  ),
+                }
+              : {}),
             ...(typeof body.specMarkdown === "string"
               ? { specMarkdown: body.specMarkdown }
               : {}),
@@ -482,7 +490,14 @@ export function startWebDashboardServer(opts?: {
         }
         if (name === "model_ensure") {
           const out = await modelEnsure(ctx, {
-            ...(body.llm ? { llm: LlmPolicySchema.parse(body.llm) } : {}),
+            ...(body.llm
+              ? {
+                  llm: mergeLlmPolicyWithProjectProfile(
+                    LlmPolicySchema.parse(body.llm),
+                    projectCfg.config ?? undefined,
+                  ),
+                }
+              : {}),
           });
           sendJson(res, 200, out);
           return;

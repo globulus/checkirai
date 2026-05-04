@@ -1,8 +1,9 @@
 import { performance } from "node:perf_hooks";
 import type { z } from "zod";
-import { ensureModelAvailable } from "../llm/modelOps.js";
-import { ollamaGenerate } from "../llm/ollamaHttp.js";
-import { remoteChatCompletion } from "../llm/remoteOpenAIClient.js";
+import {
+  chatJsonForRole,
+  policyForPlannerLlmCall,
+} from "../llm/chatForRole.js";
 import type { LlmPolicy } from "../llm/types.js";
 import type { McpToolDescriptor } from "../mcp/client.js";
 import { VerifierError } from "../shared/errors.js";
@@ -78,6 +79,9 @@ async function generatePlanOnce(opts: {
     "- Only use tools that exist in the provided MCP tool list.",
     "- Tool args MUST conform to the provided tool inputSchema (required keys, types, additionalProperties=false).",
     "- Every requirement must have enough evidence: include at least one of take_snapshot / take_screenshot / evaluate_script / list_* as appropriate.",
+    "- For text_present / visible copy: prefer take_snapshot (and optional take_screenshot) over many evaluate_script calls.",
+    "- For requirement type `appearance` or any expected_observable with CSS (e.g. element_visible + metadata.css colors): you MUST include evaluate_script that returns getComputedStyle(...) fields (color, backgroundColor, borderColor) for the relevant elements (a11y snapshots do not include colors).",
+    "- evaluate_script MUST NOT throw: never use document.querySelector(...).innerText without optional chaining (?.) or an explicit null guard; invented class names or tag names not in SPEC_IR will fail at runtime.",
     "- Keep timeouts bounded (e.g. wait_for timeout <= 10000ms unless justified).",
     "- Prefer a single navigation to targetUrl early, then evidence collection.",
     "- Avoid redundant calls unless needed for evidence.",
@@ -95,48 +99,22 @@ async function generatePlanOnce(opts: {
     "Output JSON only.",
   ].join("\n");
 
-  if (opts.llm.provider === "ollama") {
-    const { selectedModel } = await ensureModelAvailable(opts.llm);
-    opts.onSelectedModel?.(selectedModel);
-    const gen = await ollamaGenerate(opts.llm.ollamaHost, {
-      model: selectedModel,
-      system,
-      prompt,
-      format: "json",
-      stream: false,
-      options: { temperature: 0 },
-    });
-    const raw = gen.response;
-    const json = JSON.parse(raw) as unknown;
-    return { plan: PlannerOutputSchema.parse(json), raw };
+  const planPolicy = policyForPlannerLlmCall(opts.llm);
+  if (planPolicy.plannerAssist.provider === "none") {
+    throw new VerifierError(
+      "CONFIG_ERROR",
+      "LLM plannerAssist and judge are both disabled (provider none); cannot plan.",
+    );
   }
 
-  if (opts.llm.provider === "remote") {
-    if (!opts.llm.remoteBaseUrl || !opts.llm.remoteApiKey) {
-      throw new VerifierError(
-        "CONFIG_ERROR",
-        "Remote LLM policy missing remoteBaseUrl/remoteApiKey.",
-      );
-    }
-    // Minimal remote support: require caller to set model in `ollamaModel` field for now.
-    const model = opts.llm.ollamaModel || "gpt-4.1-mini";
-    const out = await remoteChatCompletion({
-      baseUrl: opts.llm.remoteBaseUrl,
-      apiKey: opts.llm.remoteApiKey,
-      model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0,
-    });
-    const raw = out.content;
-    const json = JSON.parse(raw) as unknown;
-    return { plan: PlannerOutputSchema.parse(json), raw };
-  }
-
-  // provider=none should never call planner.
-  throw new VerifierError("CONFIG_ERROR", "LLM provider is none; cannot plan.");
+  const { responseText, modelUsed } = await chatJsonForRole(
+    planPolicy,
+    "plannerAssist",
+    { system, prompt },
+    opts.onSelectedModel ? { onSelectedModel: opts.onSelectedModel } : {},
+  );
+  const json = JSON.parse(responseText) as unknown;
+  return { plan: PlannerOutputSchema.parse(json), raw: responseText };
 }
 
 export async function planWithSelfConsistency(opts: {
