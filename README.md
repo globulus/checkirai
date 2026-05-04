@@ -6,7 +6,10 @@ _|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""|_|"""""| {======|_|"""""|_|"""""
 "`-0-0-'"`-0-0-'"`-0-0-'"`-0-0-'"`-0-0-'"`-0-0-'"`-0-0-'./o--000'"`-0-0-'"`-0-0-'
 ```
 
-> **Local LLMs + MCP-backed tools** to parse specs, plan probes, collect evidence and return requirement-level verdicts—without paying cloud token or request costs for every verification pass.
+> **Local LLMs + MCP-backed tools = test your builds locally without paying token costs!**
+> Parse specs, plan probes, collect evidence and return requirement-level verdicts.
+
+[![Build](https://github.com/globulus/checkirai/actions/workflows/node.js.yml/badge.svg?branch=main)](https://github.com/globulus/checkirai/actions/workflows/node.js.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Checkir AI** is a spec-driven verification runtime: it reads a human-readable spec, plans probes, runs tools (including MCP-backed capabilities) and returns **requirement-level verdicts** — pass, fail, inconclusive, or blocked — with evidence you can inspect offline. LLM-assisted phases default to **Ollama** on your machine; you can also use a **`remote`** provider (OpenAI-compatible HTTP API) for normalization and judging. Tool hosts connect over **MCP** the same way Cursor or Claude Code talks to other servers.
 
@@ -40,7 +43,6 @@ Note that doing the same task (spec-based software verification using tools) wit
 - **Node.js** 22 or newer (`engines` in `package.json`)
 - **pnpm** (recommended; scripts assume it)
 - **Ollama** (optional but default for LLM-assisted phases) — install separately and start the daemon
-- **Playwright browsers** if you enable `playwright-mcp` in `--tools` (`pnpm exec playwright install` as needed)
 
 ---
 
