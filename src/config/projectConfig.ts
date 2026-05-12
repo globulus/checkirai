@@ -47,6 +47,8 @@ export const ProjectConfigSchema = z.object({
       /** Selects a key from top-level `profiles` to merge over `llm` defaults. */
       profile: z.string().optional(),
       allowShellMetacharacters: z.boolean().optional(),
+      /** `file:` URI for Dart/Flutter fixture or app under test. */
+      dartProjectRoot: z.string().optional(),
     })
     .optional(),
   llm: LlmPolicySchema.optional(),

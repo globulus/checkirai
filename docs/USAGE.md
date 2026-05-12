@@ -67,9 +67,9 @@ checkirai verify \
   --out .verifier
 ```
 
-**`--tools`** is a comma-separated list of **integration** tokens (what to wire up): `fs`, `http`, `shell`, `playwright-mcp`, `chrome-devtools`. The CLI default is `fs,http`. The web dashboard may pick up `defaults.tools` from `checkirai.config.json` when you omit tools on a request (see below).
+**`--tools`** is a comma-separated list of **integration** tokens (what to wire up): `fs`, `http`, `shell`, `playwright-mcp`, `chrome-devtools`, `dart-mcp`. The CLI default is `fs,http`. The web dashboard may pick up `defaults.tools` from `checkirai.config.json` when you omit tools on a request (see below).
 
-Those tools map to a **capability graph** of verifier **capabilities**—the atomic actions probes may use—such as: **`navigate`**, **`read_ui_structure`**, **`read_visual`**, **`interact`**, **`read_console`**, **`read_network`**, **`read_files`**, **`run_command`**, **`call_http`**, **`query_data_store`**, **`read_source_code`**, **`read_design_reference`**. The canonical list is **`ALL_CAPABILITY_NAMES`** in **`src/capabilities/types.ts`**; MCP **`list_capabilities`** describes what is available for a given **`tools`** string.
+Those tools map to a **capability graph** of verifier **capabilities**—the atomic actions probes may use—such as: **`navigate`**, **`read_ui_structure`**, **`read_visual`**, **`interact`**, **`read_console`**, **`read_network`**, **`read_files`**, **`run_command`**, **`call_http`**, **`query_data_store`**, **`read_source_code`**, **`read_design_reference`**, **`run_automated_tests`**, **`read_flutter_runtime`**. The canonical list is **`ALL_CAPABILITY_NAMES`** in **`src/capabilities/types.ts`**; MCP **`list_capabilities`** describes what is available for a given **`tools`** string.
 
 **Other useful `verify` flags:** `--policy read_only|ui_only`, `--llm-provider ollama|none` (applies to all roles: **`none`** disables every role; **`ollama`** keeps per-role config from the file), `--ollama-host`, `--ollama-model` (when set, overrides **every** Ollama role’s **`model`** after merge—omit to keep per-role tags from config), `--restart-from start|spec_ir|llm_plan` with `--restart-run <parentRunId>` to reuse artifacts from a previous run.
 
@@ -101,7 +101,7 @@ At the repo root (or `.checkirai/config.json`), you can set defaults, LLM policy
 | **`defaults`** | `targetUrl`, `tools`, `outRoot`, optional **`profile`** (key into **`profiles`** for LLM hardware overrides). Also: **`maxRunMs`**, **`runCommandAllowlist`**, **`allowShellMetacharacters`** (allow `;&|…` in allowlisted `run_command`—dangerous; default false), **`stepRetries`** / **`stepRetryDelayMs`**, **`isolateProbeSessions`**, **`artifactMaxRuns`**. |
 | **`llm`** | Shared: **`ollamaHost`**, **`allowAutoPull`**, **`requireToolCapable`**. Per role **`normalizer`**, **`plannerAssist`**, **`judge`**, **`triage`**: **`provider`** (`ollama` \| `remote` \| `none`), **`model`**, optional **`fallbackModel`**, **`temperature`**, **`maxRetries`**, **`timeoutMs`**; for **`remote`**, **`remoteBaseUrl`** and **`remoteApiKey`** on that role. Prefer env-backed secrets in production; the file is plain JSON. |
 | **`profiles`** | Optional object (e.g. `laptop_16gb`) whose values are partial **`llm`**-shaped patches (per-role fields only) merged when **`defaults.profile`** or **`CHECKIRAI_PROFILE`** matches the key. |
-| **`mcpServers`** | e.g. `chrome-devtools` with `command` / `args` / `cwd` / `env` so **`checkirai verify`** can spawn Chrome DevTools MCP when `--tools` includes `chrome-devtools`. |
+| **`mcpServers`** | e.g. `chrome-devtools` or `dart-mcp` with `command` / `args` / `cwd` / `env` so **`checkirai verify`** can spawn the matching MCP server when `--tools` includes that token. Optional **`defaults.dartProjectRoot`** (`file:` URI) for Flutter fixture runs. |
 
 The CLI loads this file from the current working directory. The dashboard loads it for **merged defaults**, initial **LLM** form state, Chrome DevTools spawn configuration, and profile hints.
 
@@ -221,6 +221,29 @@ checkirai chrome-devtools self-check --command <cmd> [--args "..."] [--cwd <dir>
 ```
 
 Point `--command` / `--args` at the same launch you configure under `mcpServers.chrome-devtools` in `checkirai.config.json` (for example `pnpm` + `exec chrome-devtools-mcp ...`).
+
+---
+
+## Dart/Flutter MCP (CLI diagnostics and fixture verify)
+
+Register the Dart MCP server in Cursor (`mcp.json` key `dart` or `dart-mcp`) or under `mcpServers.dart-mcp` in `checkirai.config.json` (for example `dart mcp-server --experimental-mcp-server --force-roots-fallback`).
+
+```bash
+checkirai dart-mcp list-tools --command dart --args "mcp-server --experimental-mcp-server --force-roots-fallback"
+checkirai dart-mcp self-check --command dart --args "mcp-server --experimental-mcp-server --force-roots-fallback"
+```
+
+Widget-test showcase (omit `http` so URL preflight is skipped; pass a `file:` project root):
+
+```bash
+checkirai verify \
+  --spec fixtures/flutter-spec.md \
+  --target file://fixture \
+  --tools fs,dart-mcp \
+  --dart-project-root "$(pwd)/fixtures/flutter_app"
+```
+
+Driver-style runs additionally need a device/emulator id via `--dart-driver-device` (or the dashboard MCP tab) so preflight can `launch_app` and connect DTD before `flutter_driver` steps.
 
 ---
 

@@ -2,7 +2,7 @@
   "version": 1,
   "defaults": {
     "targetUrl": "http://localhost:5173",
-    "tools": "fs,http,playwright-mcp,chrome-devtools",
+    "tools": "fs,http,playwright-mcp,chrome-devtools,dart-mcp",
     "outRoot": ".verifier"
   },
   "llm": {
@@ -71,6 +71,14 @@
     "chrome-devtools": {
       "command": "pnpm",
       "args": ["exec", "chrome-devtools-mcp", "--isolated"]
+    },
+    "dart-mcp": {
+      "command": "dart",
+      "args": [
+        "mcp-server",
+        "--experimental-mcp-server",
+        "--force-roots-fallback"
+      ]
     }
   },
   "skills": []

@@ -2,6 +2,7 @@ export {
   chromeDevtoolsListTools,
   chromeDevtoolsSelfCheck,
 } from "./chromeDevtoolsOps.js";
+export { dartMcpListTools, dartMcpSelfCheck } from "./dartMcpOps.js";
 export {
   closeOpsContext,
   createOpsContext,

@@ -35,6 +35,7 @@ Note that doing the same task (spec-based software verification using tools) wit
 - **Exploratory “what would we test?”:** Use `suggest_probe_plan` over MCP to plan probes without executing a full run.
 - **Local model hygiene:** Use `ollama status`, `model list`, `model suggest`, and `model pull` so the right instruct/tool-capable model is available before a run.
 - **Chrome DevTools MCP wiring:** Use `chrome-devtools list-tools` / `self-check` to confirm your MCP server exposes the expected tool surface (see `checkirai.config.json` for project defaults).
+- **Dart/Flutter MCP wiring:** Use `dart-mcp list-tools` / `self-check` and the `fixtures/flutter_app` + `fixtures/flutter-spec.md` showcase for `run_tests` and driver-style verification.
 
 ---
 
@@ -88,7 +89,7 @@ Copy or edit `checkirai.config.json` (or `.checkirai/config.json`) in your proje
 - **`defaults`** — `targetUrl`, `tools`, `outRoot`, optional **`profile`** (selects a key from **`profiles`** for LLM overrides), plus runtime tuning: `maxRunMs`, `runCommandAllowlist` (prefix with `*` or full command line; **empty means no `run_command` runs**), **`allowShellMetacharacters`** (opt-in to shell metacharacters in allowlisted commands), `stepRetries`, `stepRetryDelayMs`, `isolateProbeSessions` (one session per probe), `artifactMaxRuns` (prune old per-run artifact folders).
 - **`llm`** — Shared: **`ollamaHost`**, **`allowAutoPull`**, **`requireToolCapable`**. Per role **`normalizer`**, **`plannerAssist`**, **`judge`**, **`triage`**: each has **`provider`** (`ollama` \| `remote` \| `none`), **`model`**, optional **`fallbackModel`**, **`temperature`**, **`maxRetries`**, **`timeoutMs`**, and when **`remote`**: **`remoteBaseUrl`**, **`remoteApiKey`**. There is no single global `ollamaModel: "auto"`; each role names an explicit model tag (defaults ship in `src/llm/types.ts` and the sample config).
 - **`profiles`** — Optional map (e.g. `laptop_16gb`) of partial per-role overrides merged on top of **`llm`** when **`defaults.profile`** or **`CHECKIRAI_PROFILE`** is set.
-- **`mcpServers`** — e.g. `chrome-devtools` with `command` / `args` so **`checkirai verify`** can spawn Chrome DevTools MCP when `--tools` includes `chrome-devtools`.
+- **`mcpServers`** — e.g. `chrome-devtools` or `dart-mcp` with `command` / `args` so **`checkirai verify`** can spawn the matching MCP server when `--tools` includes that integration token.
 
 ---
 
@@ -118,7 +119,9 @@ Verify a target URL against a markdown spec (or restart from a previous run).
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--spec <path>`                              | Path to spec markdown (required unless restarting from `spec_ir` / `llm_plan` with `--restart-run`)                                                                                                                                                                |
 | `--target <url>`                             | Base URL of the app under test (**required**)                                                                                                                                                                                                                      |
-| `--tools <list>`                             | Comma-separated: `playwright-mcp`, `shell`, `fs`, `http`, `chrome-devtools` (default `fs,http`)                                                                                                                                                                    |
+| `--tools <list>`                             | Comma-separated: `playwright-mcp`, `shell`, `fs`, `http`, `chrome-devtools`, `dart-mcp` (default `fs,http`)                                                                                                                                                         |
+| `--dart-project-root <uri>`                  | Dart/Flutter project root (`file:` URI or absolute path) when using `dart-mcp`                                                                                                                                                                                      |
+| `--dart-driver-device <id>`                  | Optional device id for `launch_app` preflight (driver-style runs)                                                                                                                                                                                                   |
 | `--out <dir>`                                | Output root (default `.verifier`)                                                                                                                                                                                                                                  |
 | `--policy <name>`                            | `read_only` or `ui_only`                                                                                                                                                                                                                                           |
 | `--llm-provider <p>`                         | `ollama`, `remote`, or `none` (default `ollama`). **`none`** turns off all four roles. **`remote`** is not fully selectable from flags alone—put per-role **`remote*`** fields in **`checkirai.config.json`**; the CLI does not pass API keys on the command line. |
@@ -175,6 +178,26 @@ Spawn a Chrome DevTools MCP server process and log the tools it exposes.
 ### `checkirai chrome-devtools self-check`
 
 Verify the Chrome DevTools MCP server exposes the expected tool surface.
+
+| Option            | Description  |
+| ----------------- | ------------ |
+| `--command <cmd>` | **Required** |
+| `--args <args>`   | Optional     |
+| `--cwd <cwd>`     | Optional     |
+
+### `checkirai dart-mcp list-tools`
+
+Spawn the Dart/Flutter MCP server process and log the tools it exposes.
+
+| Option            | Description                                        |
+| ----------------- | -------------------------------------------------- |
+| `--command <cmd>` | **Required** — executable to launch the MCP server |
+| `--args <args>`   | Space-separated arguments (optional)               |
+| `--cwd <cwd>`     | Working directory (default: current directory)     |
+
+### `checkirai dart-mcp self-check`
+
+Verify the Dart MCP server exposes the expected tool surface.
 
 | Option            | Description  |
 | ----------------- | ------------ |
@@ -247,7 +270,7 @@ You do **not** have to redo every expensive step. A parent run stores artifacts;
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`start`**      | Full pipeline from spec input (default).                                                                                                                                                                                                                                                             |
 | **`spec_ir`**    | Reuse the parent’s **frozen Spec IR**—skip normalization LLM work; continue with planning and later stages.                                                                                                                                                                                          |
-| **`llm_plan`**   | Reuse the parent’s **saved test-plan artifact**—skip normalization and the main planning phase; continue with execution and judgement. Requires the same kind of setup as a full **Chrome DevTools + LLM** generic loop (e.g. `chrome-devtools` in `--tools` and an LLM provider other than `none`). |
+| **`llm_plan`**   | Reuse the parent’s **saved test-plan artifact**—skip normalization and the main planning phase; continue with execution and judgement. Requires the same kind of setup as a full **MCP + LLM** generic loop (e.g. `chrome-devtools` or `dart-mcp` in `--tools` and an LLM provider other than `none`). |
 
 The same **`restartFromPhase` / `restartFromRunId`** fields exist on **`verify_spec`** over MCP and on the web API; over MCP you can also call **`restart_verify_spec`** with **`parentRunId`** (and optional overrides). Pick the phase that matches how much of the parent run you want to reuse when iterating on plans, tooling, or judges.
 

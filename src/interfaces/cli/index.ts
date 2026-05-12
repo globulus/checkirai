@@ -1,4 +1,7 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Command } from "commander";
 import pino from "pino";
 import {
@@ -10,6 +13,8 @@ import { LlmPolicySchema } from "../../llm/types.js";
 import {
   chromeDevtoolsListTools,
   chromeDevtoolsSelfCheck,
+  dartMcpListTools,
+  dartMcpSelfCheck,
   closeOpsContext,
   createOpsContext,
   modelList,
@@ -30,6 +35,59 @@ import {
 } from "./verifyRunPrinter.js";
 
 const logger = pino({ name: "checkirai" }, pino.destination(2));
+
+function readCursorMcpServer(name: string): {
+  command: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+} | null {
+  try {
+    const p = join(homedir(), ".cursor", "mcp.json");
+    const txt = readFileSync(p, "utf8");
+    const obj = JSON.parse(txt) as {
+      mcpServers?: Record<
+        string,
+        {
+          command?: unknown;
+          args?: unknown;
+          cwd?: unknown;
+          env?: unknown;
+        }
+      >;
+    };
+    const entry = obj.mcpServers?.[name];
+    if (!entry || typeof entry.command !== "string" || !entry.command.trim()) {
+      return null;
+    }
+    const args = Array.isArray(entry.args)
+      ? entry.args.filter((x): x is string => typeof x === "string")
+      : undefined;
+    const cwd = typeof entry.cwd === "string" ? entry.cwd : undefined;
+    const envEntries =
+      entry.env && typeof entry.env === "object"
+        ? (Object.entries(entry.env as Record<string, unknown>).filter(
+            (pair): pair is [string, string] => typeof pair[1] === "string",
+          ) as Array<[string, string]>)
+        : [];
+    const env = envEntries.length ? Object.fromEntries(envEntries) : undefined;
+    return {
+      command: entry.command,
+      ...(args?.length ? { args } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(env && Object.keys(env).length ? { env } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveDartProjectRoot(raw?: string): string | undefined {
+  if (!raw?.trim()) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("file:")) return trimmed;
+  return pathToFileURL(resolve(trimmed)).href;
+}
 
 export async function main(argv = process.argv) {
   const program = new Command()
@@ -56,7 +114,15 @@ export async function main(argv = process.argv) {
     )
     .option(
       "--tools <list>",
-      "Comma-separated tools: playwright-mcp,shell,fs,http",
+      "Comma-separated tools: playwright-mcp,shell,fs,http,chrome-devtools,dart-mcp",
+    )
+    .option(
+      "--dart-project-root <uri>",
+      "Dart/Flutter project root (file: URI or absolute path)",
+    )
+    .option(
+      "--dart-driver-device <id>",
+      "Optional device id for launch_app preflight (driver-style runs)",
     )
     .option("--out <dir>", "Output directory root")
     .option("--policy <name>", "Policy name: read_only|ui_only")
@@ -244,6 +310,28 @@ export async function main(argv = process.argv) {
               : {}),
           }
         : null;
+      const dartMcpServerRaw =
+        projectCfg.config?.mcpServers?.["dart-mcp"] ??
+        readCursorMcpServer("dart-mcp") ??
+        readCursorMcpServer("dart");
+      const dartMcpServer = dartMcpServerRaw
+        ? {
+            command: dartMcpServerRaw.command,
+            ...(dartMcpServerRaw.args ? { args: dartMcpServerRaw.args } : {}),
+            ...(dartMcpServerRaw.cwd ? { cwd: dartMcpServerRaw.cwd } : {}),
+            ...(dartMcpServerRaw.env ? { env: dartMcpServerRaw.env } : {}),
+          }
+        : null;
+      const dartProjectRoot = resolveDartProjectRoot(
+        (typeof opts.dartProjectRoot === "string"
+          ? opts.dartProjectRoot
+          : undefined) ?? projectCfg.config?.defaults?.dartProjectRoot,
+      );
+      const dartDriverDevice =
+        typeof opts.dartDriverDevice === "string" &&
+        opts.dartDriverDevice.trim()
+          ? opts.dartDriverDevice.trim()
+          : undefined;
       const restartPayload =
         restartFrom !== "start" && restartRunId
           ? { restartFromPhase: restartFrom, restartFromRunId: restartRunId }
@@ -265,6 +353,11 @@ export async function main(argv = process.argv) {
             ...(toolSet.has("chrome-devtools") && chromeDevtoolsServer
               ? { chromeDevtoolsServer }
               : {}),
+            ...(toolSet.has("dart-mcp") && dartMcpServer
+              ? { dartMcpServer }
+              : {}),
+            ...(dartProjectRoot ? { dartProjectRoot } : {}),
+            ...(dartDriverDevice ? { dartDriverDevice } : {}),
           },
           { onEvent: printer.onEvent, signal: interrupt.signal },
         );
@@ -401,6 +494,70 @@ export async function main(argv = process.argv) {
       for (const t of out.tools)
         logger.info({ name: t.name, description: t.description }, "tool");
       process.exitCode = 0;
+    });
+
+  const dartMcp = program
+    .command("dart-mcp")
+    .description("Dart/Flutter MCP diagnostics");
+  dartMcp
+    .command("list-tools")
+    .description("Spawn the Dart MCP server and list tools it exposes")
+    .requiredOption(
+      "--command <cmd>",
+      "Command to launch the MCP server process",
+    )
+    .option("--args <args>", "Arguments (space-separated)", "")
+    .option("--cwd <cwd>", "Working directory", process.cwd())
+    .action(async (opts) => {
+      const ctx = createOpsContext();
+      const args = String(opts.args || "")
+        .split(" ")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const out = await dartMcpListTools(ctx, {
+        command: String(opts.command),
+        args,
+        cwd: String(opts.cwd),
+      });
+      for (const t of out.tools)
+        logger.info({ name: t.name, description: t.description }, "tool");
+      process.exitCode = 0;
+    });
+
+  dartMcp
+    .command("self-check")
+    .description(
+      "Verify the Dart MCP server supports the expected tool surface",
+    )
+    .requiredOption(
+      "--command <cmd>",
+      "Command to launch the MCP server process",
+    )
+    .option("--args <args>", "Arguments (space-separated)", "")
+    .option("--cwd <cwd>", "Working directory", process.cwd())
+    .action(async (opts) => {
+      const ctx = createOpsContext();
+      const args = String(opts.args || "")
+        .split(" ")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const out = await dartMcpSelfCheck(ctx, {
+        command: String(opts.command),
+        args,
+        cwd: String(opts.cwd),
+      });
+      if (out.ok) {
+        logger.info({ count: out.count }, "Dart MCP tool surface looks good.");
+        if (out.extra.length)
+          logger.info({ extra: out.extra }, "Extra tools available (fine).");
+        process.exitCode = 0;
+      } else {
+        logger.error(
+          { missing: out.missing, extra: out.extra },
+          "Dart MCP missing expected tools.",
+        );
+        process.exitCode = 3;
+      }
     });
 
   chrome

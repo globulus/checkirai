@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pino from "pino";
 import * as z from "zod/v4";
-import { buildCapabilityGraph } from "../../capabilities/registry.js";
+import { buildCapabilityGraphFromTools } from "../../capabilities/registry.js";
 import { VerificationResultSchema } from "../../core/result.js";
 import {
   loadProjectConfig,
@@ -56,28 +56,16 @@ export async function startMcpServer(opts?: { outDir?: string }) {
         tools: z
           .string()
           .optional()
-          .describe("Comma-separated: playwright-mcp,shell,fs,http"),
+          .describe(
+            "Comma-separated: playwright-mcp,shell,fs,http,chrome-devtools,dart-mcp",
+          ),
       },
       outputSchema: {
         capabilities: z.array(z.string()),
       },
     },
     async ({ tools }) => {
-      const toolSet = new Set(
-        String(tools ?? "fs,http")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-      );
-      const capGraph = buildCapabilityGraph({
-        enable: {
-          playwrightMcp:
-            toolSet.has("playwright-mcp") || toolSet.has("chrome-devtools"),
-          shell: toolSet.has("shell"),
-          fs: toolSet.has("fs"),
-          http: toolSet.has("http"),
-        },
-      });
+      const capGraph = buildCapabilityGraphFromTools(tools);
       const structuredContent = {
         capabilities: [...capGraph.capabilities.values()],
       };
@@ -249,21 +237,7 @@ export async function startMcpServer(opts?: { outDir?: string }) {
       const specIr = specMarkdown
         ? await normalizeMarkdownToSpecIRWithLlm(specMarkdown, llmPolicy)
         : SpecIRSchema.parse(spec ?? {});
-      const toolSet = new Set(
-        String(tools ?? "fs,http")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-      );
-      const capGraph = buildCapabilityGraph({
-        enable: {
-          playwrightMcp:
-            toolSet.has("playwright-mcp") || toolSet.has("chrome-devtools"),
-          shell: toolSet.has("shell"),
-          fs: toolSet.has("fs"),
-          http: toolSet.has("http"),
-        },
-      });
+      const capGraph = buildCapabilityGraphFromTools(tools);
       const plan = planProbes(specIr, capGraph.capabilities);
       return {
         content: [{ type: "text", text: JSON.stringify(plan, null, 2) }],
@@ -286,7 +260,7 @@ export async function startMcpServer(opts?: { outDir?: string }) {
         restartFromPhase: z
           .enum(["spec_ir", "llm_plan"])
           .describe(
-            "spec_ir: reuse saved Spec IR from parent; llm_plan: reuse Spec IR and run planning/execution again (requires chrome-devtools + LLM, same as verify_spec).",
+            "spec_ir: reuse saved Spec IR from parent; llm_plan: reuse Spec IR and run planning/execution again (requires chrome-devtools or dart-mcp + LLM, same as verify_spec).",
           ),
         targetUrl: z
           .string()
@@ -304,6 +278,15 @@ export async function startMcpServer(opts?: { outDir?: string }) {
             cwd: z.string().optional(),
           })
           .optional(),
+        dartMcpServer: z
+          .object({
+            command: z.string(),
+            args: z.array(z.string()).optional(),
+            cwd: z.string().optional(),
+          })
+          .optional(),
+        dartProjectRoot: z.string().optional(),
+        dartDriverDevice: z.string().optional(),
       },
       outputSchema: VerificationResultSchema,
     },
@@ -315,6 +298,9 @@ export async function startMcpServer(opts?: { outDir?: string }) {
       outDir,
       llm,
       chromeDevtoolsServer,
+      dartMcpServer,
+      dartProjectRoot,
+      dartDriverDevice,
     }) => {
       const parentId = parentRunId.trim();
       const parent = getRun(ctx.db, parentId);
@@ -355,6 +341,21 @@ export async function startMcpServer(opts?: { outDir?: string }) {
               },
             }
           : {}),
+        ...(dartMcpServer
+          ? {
+              dartMcpServer: {
+                command: dartMcpServer.command,
+                ...(dartMcpServer.args ? { args: dartMcpServer.args } : {}),
+                ...(dartMcpServer.cwd ? { cwd: dartMcpServer.cwd } : {}),
+              },
+            }
+          : {}),
+        ...(dartProjectRoot?.trim()
+          ? { dartProjectRoot: dartProjectRoot.trim() }
+          : {}),
+        ...(dartDriverDevice?.trim()
+          ? { dartDriverDevice: dartDriverDevice.trim() }
+          : {}),
       } satisfies VerifySpecInput;
 
       const { result } = await verifySpec(ctx, verifyInput);
@@ -385,6 +386,15 @@ export async function startMcpServer(opts?: { outDir?: string }) {
             cwd: z.string().optional(),
           })
           .optional(),
+        dartMcpServer: z
+          .object({
+            command: z.string(),
+            args: z.array(z.string()).optional(),
+            cwd: z.string().optional(),
+          })
+          .optional(),
+        dartProjectRoot: z.string().optional(),
+        dartDriverDevice: z.string().optional(),
         restartFromPhase: z.enum(["start", "spec_ir", "llm_plan"]).optional(),
         restartFromRunId: z.string().optional(),
       },
@@ -399,6 +409,9 @@ export async function startMcpServer(opts?: { outDir?: string }) {
       outDir,
       llm,
       chromeDevtoolsServer,
+      dartMcpServer,
+      dartProjectRoot,
+      dartDriverDevice,
       restartFromPhase,
       restartFromRunId,
     }) => {
@@ -434,6 +447,21 @@ export async function startMcpServer(opts?: { outDir?: string }) {
                   : {}),
               },
             }
+          : {}),
+        ...(dartMcpServer
+          ? {
+              dartMcpServer: {
+                command: dartMcpServer.command,
+                ...(dartMcpServer.args ? { args: dartMcpServer.args } : {}),
+                ...(dartMcpServer.cwd ? { cwd: dartMcpServer.cwd } : {}),
+              },
+            }
+          : {}),
+        ...(dartProjectRoot?.trim()
+          ? { dartProjectRoot: dartProjectRoot.trim() }
+          : {}),
+        ...(dartDriverDevice?.trim()
+          ? { dartDriverDevice: dartDriverDevice.trim() }
           : {}),
         ...(restartFromPhase && restartFromPhase !== "start"
           ? {

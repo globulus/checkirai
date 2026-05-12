@@ -13,6 +13,8 @@ export const CapabilityNameSchema = z.enum([
   "query_data_store",
   "read_source_code",
   "read_design_reference",
+  "run_automated_tests",
+  "read_flutter_runtime",
 ]);
 export type CapabilityName = z.infer<typeof CapabilityNameSchema>;
 
@@ -30,6 +32,8 @@ export const Capability = {
   query_data_store: "query_data_store",
   read_source_code: "read_source_code",
   read_design_reference: "read_design_reference",
+  run_automated_tests: "run_automated_tests",
+  read_flutter_runtime: "read_flutter_runtime",
 } as const satisfies Record<string, CapabilityName>;
 
 /** All capability string ids (for policies, UI, and exhaustiveness checks). */

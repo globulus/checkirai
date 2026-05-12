@@ -5,7 +5,7 @@ import os from "node:os";
 import { extname, join } from "node:path";
 import { URL } from "node:url";
 import pino from "pino";
-import { buildCapabilityGraph } from "../../capabilities/registry.js";
+import { buildCapabilityGraphFromTools } from "../../capabilities/registry.js";
 import {
   loadProjectConfig,
   mergeLlmPolicyWithProjectProfile,
@@ -14,6 +14,8 @@ import { LlmPolicySchema, summarizeLlmPolicyForRun } from "../../llm/types.js";
 import {
   chromeDevtoolsListTools,
   chromeDevtoolsSelfCheck,
+  dartMcpListTools,
+  dartMcpSelfCheck,
   createOpsContext,
   explainFailure,
   getArtifact,
@@ -255,6 +257,15 @@ export function startWebDashboardServer(opts?: {
         return;
       }
 
+      if (pathname === "/api/mcp/dart-mcp" && req.method === "GET") {
+        const cfg =
+          projectCfg.config?.mcpServers?.["dart-mcp"] ??
+          readCursorMcpServer("dart-mcp") ??
+          readCursorMcpServer("dart");
+        sendJson(res, 200, { ok: Boolean(cfg), server: cfg });
+        return;
+      }
+
       if (pathname === "/api/runs" && req.method === "GET") {
         const limit = url.searchParams.get("limit");
         const rows = listRuns(ctx.db, { limit: limit ? Number(limit) : 50 });
@@ -387,6 +398,45 @@ export function startWebDashboardServer(opts?: {
                 },
               };
             })(),
+            ...(() => {
+              const dms = body.dartMcpServer as unknown;
+              const dmsObj =
+                dms && typeof dms === "object"
+                  ? (dms as Record<string, unknown>)
+                  : null;
+              const command =
+                dmsObj && typeof dmsObj.command === "string"
+                  ? dmsObj.command
+                  : null;
+              if (!command) return {};
+
+              const args =
+                dmsObj && Array.isArray(dmsObj.args)
+                  ? (dmsObj.args.filter(
+                      (x) => typeof x === "string",
+                    ) as string[])
+                  : undefined;
+              const cwd =
+                dmsObj && typeof dmsObj.cwd === "string"
+                  ? dmsObj.cwd
+                  : undefined;
+
+              return {
+                dartMcpServer: {
+                  command,
+                  ...(args ? { args } : {}),
+                  ...(cwd ? { cwd } : {}),
+                },
+              };
+            })(),
+            ...(typeof body.dartProjectRoot === "string" &&
+            body.dartProjectRoot.trim()
+              ? { dartProjectRoot: body.dartProjectRoot.trim() }
+              : {}),
+            ...(typeof body.dartDriverDevice === "string" &&
+            body.dartDriverDevice.trim()
+              ? { dartDriverDevice: body.dartDriverDevice.trim() }
+              : {}),
             ...(typeof body.restartFromRunId === "string" &&
             body.restartFromRunId.trim()
               ? { restartFromRunId: body.restartFromRunId.trim() }
@@ -430,6 +480,43 @@ export function startWebDashboardServer(opts?: {
               runId,
             });
             return;
+          }
+
+          const wantsDartMcp = toolsStr
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .includes("dart-mcp");
+          if (wantsDartMcp && !verifyInput.dartMcpServer) {
+            const fallback =
+              projectCfg.config?.mcpServers?.["dart-mcp"] ??
+              readCursorMcpServer("dart-mcp") ??
+              readCursorMcpServer("dart");
+            if (fallback) {
+              verifyInput.dartMcpServer = {
+                command: fallback.command,
+                ...(fallback.args ? { args: fallback.args } : {}),
+                ...(fallback.cwd ? { cwd: fallback.cwd } : {}),
+                ...(fallback.env ? { env: fallback.env } : {}),
+              };
+            }
+          }
+          if (wantsDartMcp && !verifyInput.dartMcpServer) {
+            sendJson(res, 400, {
+              ok: false,
+              error:
+                "tools includes 'dart-mcp' but dartMcpServer is missing (command/args/cwd).",
+              runId,
+            });
+            return;
+          }
+          if (
+            wantsDartMcp &&
+            !verifyInput.dartProjectRoot?.trim() &&
+            projectCfg.config?.defaults?.dartProjectRoot?.trim()
+          ) {
+            verifyInput.dartProjectRoot =
+              projectCfg.config.defaults.dartProjectRoot.trim();
           }
 
           const job = verifySpec(ctx, verifyInput, { runId })
@@ -539,21 +626,9 @@ export function startWebDashboardServer(opts?: {
         }
 
         if (name === "list_capabilities") {
-          const toolSet = new Set(
-            String(body.tools ?? "fs,http")
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
+          const capGraph = buildCapabilityGraphFromTools(
+            typeof body.tools === "string" ? body.tools : undefined,
           );
-          const capGraph = buildCapabilityGraph({
-            enable: {
-              playwrightMcp:
-                toolSet.has("playwright-mcp") || toolSet.has("chrome-devtools"),
-              shell: toolSet.has("shell"),
-              fs: toolSet.has("fs"),
-              http: toolSet.has("http"),
-            },
-          });
           sendJson(res, 200, {
             capabilities: [...capGraph.capabilities.values()],
           });
@@ -565,21 +640,9 @@ export function startWebDashboardServer(opts?: {
             typeof body.specMarkdown === "string"
               ? normalizeMarkdownToSpecIR(body.specMarkdown)
               : SpecIRSchema.parse(body.spec ?? {});
-          const toolSet = new Set(
-            String(body.tools ?? "fs,http")
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
+          const capGraph = buildCapabilityGraphFromTools(
+            typeof body.tools === "string" ? body.tools : undefined,
           );
-          const capGraph = buildCapabilityGraph({
-            enable: {
-              playwrightMcp:
-                toolSet.has("playwright-mcp") || toolSet.has("chrome-devtools"),
-              shell: toolSet.has("shell"),
-              fs: toolSet.has("fs"),
-              http: toolSet.has("http"),
-            },
-          });
           const plan = planProbes(specIr, capGraph.capabilities);
           sendJson(res, 200, plan);
           return;
@@ -599,6 +662,30 @@ export function startWebDashboardServer(opts?: {
 
         if (name === "chrome_devtools_self_check") {
           const out = await chromeDevtoolsSelfCheck(ctx, {
+            command: String(body.command ?? ""),
+            ...(Array.isArray(body.args)
+              ? { args: body.args as string[] }
+              : {}),
+            ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
+          });
+          sendJson(res, 200, out);
+          return;
+        }
+
+        if (name === "dart_mcp_list_tools") {
+          const out = await dartMcpListTools(ctx, {
+            command: String(body.command ?? ""),
+            ...(Array.isArray(body.args)
+              ? { args: body.args as string[] }
+              : {}),
+            ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
+          });
+          sendJson(res, 200, out);
+          return;
+        }
+
+        if (name === "dart_mcp_self_check") {
+          const out = await dartMcpSelfCheck(ctx, {
             command: String(body.command ?? ""),
             ...(Array.isArray(body.args)
               ? { args: body.args as string[] }

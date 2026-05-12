@@ -61,6 +61,12 @@ export async function getChromeDevtoolsMcpConfig() {
   );
 }
 
+export async function getDartMcpConfig() {
+  return await j<{ ok: boolean; server: McpServerConfig | null }>(
+    await fetch("/api/mcp/dart-mcp"),
+  );
+}
+
 export async function getProjectConfig() {
   return await j<{ ok: boolean; path: string | null; config: unknown | null }>(
     await fetch("/api/project-config"),

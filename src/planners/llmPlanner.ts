@@ -58,6 +58,8 @@ async function generatePlanOnce(opts: {
   targetUrl: string;
   tools: McpToolDescriptor[];
   attempt: number;
+  dartProjectRoot?: string;
+  plannerHints?: string[];
   onSelectedModel?: (model: string) => void;
 }): Promise<{ plan: PlannerOutput; raw: string }> {
   const system = "You are a generic test planner. Produce ONLY JSON. No prose.";
@@ -73,13 +75,14 @@ async function generatePlanOnce(opts: {
     "  notes?: string",
     "}",
     "",
-    'CapabilityName = "navigate"|"read_ui_structure"|"read_visual"|"interact"|"read_console"|"read_network"|"read_files"|"run_command"|"call_http"',
+    'CapabilityName = "navigate"|"read_ui_structure"|"read_visual"|"interact"|"read_console"|"read_network"|"read_files"|"run_command"|"call_http"|"run_automated_tests"|"read_flutter_runtime"',
     "",
     "Rules:",
     "- Only use tools that exist in the provided MCP tool list.",
     "- Tool args MUST conform to the provided tool inputSchema (required keys, types, additionalProperties=false).",
-    "- Every requirement must have enough evidence: include at least one of take_snapshot / take_screenshot / evaluate_script / list_* as appropriate.",
+    "- Every requirement must have enough evidence: include at least one of take_snapshot / take_screenshot / evaluate_script / run_tests / get_widget_tree / flutter_driver / list_* as appropriate.",
     "- For text_present / visible copy: prefer take_snapshot (and optional take_screenshot) over many evaluate_script calls.",
+    "- For Flutter/Dart tools: pass project roots as file: URIs in roots[].root; call get_widget_tree before inventing flutter_driver finders; prefer run_tests when requirements are covered by automated tests.",
     "- For requirement type `appearance` or any expected_observable with CSS (e.g. element_visible + metadata.css colors): you MUST include evaluate_script that returns getComputedStyle(...) fields (color, backgroundColor, borderColor) for the relevant elements (a11y snapshots do not include colors).",
     "- evaluate_script MUST NOT throw: never use document.querySelector(...).innerText without optional chaining (?.) or an explicit null guard; invented class names or tag names not in SPEC_IR will fail at runtime.",
     "- Keep timeouts bounded (e.g. wait_for timeout <= 10000ms unless justified).",
@@ -87,6 +90,12 @@ async function generatePlanOnce(opts: {
     "- Avoid redundant calls unless needed for evidence.",
     "",
     `TARGET_URL: ${opts.targetUrl}`,
+    ...(opts.dartProjectRoot
+      ? [`DART_PROJECT_ROOT: ${opts.dartProjectRoot}`, ""]
+      : []),
+    ...(opts.plannerHints?.length
+      ? ["", ...opts.plannerHints.map((hint) => `- ${hint}`), ""]
+      : []),
     "",
     "AVAILABLE_MCP_TOOLS:",
     JSON.stringify(toolSummary(opts.tools), null, 2),
@@ -123,6 +132,8 @@ export async function planWithSelfConsistency(opts: {
   targetUrl: string;
   tools: McpToolDescriptor[];
   attempts?: number; // default 5
+  dartProjectRoot?: string;
+  plannerHints?: string[];
   onSelectedModel?: (model: string) => void;
 }): Promise<{
   plan: TestPlanIR;
@@ -151,6 +162,12 @@ export async function planWithSelfConsistency(opts: {
         targetUrl: opts.targetUrl,
         tools: opts.tools,
         attempt: i,
+        ...(opts.dartProjectRoot
+          ? { dartProjectRoot: opts.dartProjectRoot }
+          : {}),
+        ...(opts.plannerHints?.length
+          ? { plannerHints: opts.plannerHints }
+          : {}),
         ...(opts.onSelectedModel
           ? { onSelectedModel: opts.onSelectedModel }
           : {}),

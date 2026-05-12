@@ -1,8 +1,13 @@
-import type { CapabilityName, CapabilitySet } from "./types.js";
+import type { CapabilitySet } from "./types.js";
+import {
+  capabilitiesForPluginIds,
+  capabilitiesFromTools,
+} from "../plugins/capabilities.js";
 
 export type IntegrationConfig = {
   enable: {
     playwrightMcp?: boolean;
+    dartMcp?: boolean;
     shell?: boolean;
     fs?: boolean;
     http?: boolean;
@@ -11,33 +16,18 @@ export type IntegrationConfig = {
 
 export type CapabilityGraph = {
   capabilities: CapabilitySet;
-  // MVP: integrations are registered separately; graph currently only exposes availability.
 };
 
 export function buildCapabilityGraph(cfg: IntegrationConfig): CapabilityGraph {
-  const capabilities = new Set<CapabilityName>();
+  const pluginIds: string[] = [];
+  if (cfg.enable.fs) pluginIds.push("fs");
+  if (cfg.enable.http) pluginIds.push("http");
+  if (cfg.enable.shell) pluginIds.push("shell");
+  if (cfg.enable.dartMcp) pluginIds.push("dart-mcp");
+  if (cfg.enable.playwrightMcp) pluginIds.push("playwright-mcp");
+  return { capabilities: capabilitiesForPluginIds(pluginIds) };
+}
 
-  if (cfg.enable.playwrightMcp) {
-    capabilities.add("navigate");
-    capabilities.add("read_ui_structure");
-    capabilities.add("read_visual");
-    capabilities.add("interact");
-    capabilities.add("read_console");
-    capabilities.add("read_network");
-  }
-
-  if (cfg.enable.fs) {
-    capabilities.add("read_files");
-    capabilities.add("read_source_code");
-  }
-
-  if (cfg.enable.shell) {
-    capabilities.add("run_command");
-  }
-
-  if (cfg.enable.http) {
-    capabilities.add("call_http");
-  }
-
-  return { capabilities };
+export function buildCapabilityGraphFromTools(tools?: string): CapabilityGraph {
+  return { capabilities: capabilitiesFromTools(tools) };
 }
